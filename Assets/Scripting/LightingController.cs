@@ -28,6 +28,16 @@ public class LightingController : MonoBehaviour
     [SerializeField] float exposureSmoothing = 1.5f;
     [SerializeField] float middleGrey = 0.18f;
 
+    // ARCore's averageBrightness units are not documented as normalised, and post-processing
+    // in AR Foundation covers the camera feed as well as the model â€” so an out-of-range
+    // reading blows out the ENTIRE frame, not just the building. Always clamp.
+    [Tooltip("Hard limits on computed exposure, in EV. Widen only once calibrated on device.")]
+    [SerializeField] float minExposureEV = -2f;
+    [SerializeField] float maxExposureEV = 2f;
+
+    [Tooltip("Log the first few brightness readings so the curve can be calibrated.")]
+    [SerializeField] bool logExposureSamples = true;
+
     [Header("Aerial perspective")]
     [SerializeField] bool driveFogColour = true;
     [SerializeField] int skySampleIntervalFrames = 30;
@@ -36,20 +46,21 @@ public class LightingController : MonoBehaviour
 
     ColorAdjustments colorAdjustments;
     float smoothedExposure;
+    int _exposureLogCount;
     float sunTimer;
     int frameCounter;
     bool loggedEstimationMode;
 
-    // Wire this to a debug Text element — you will want it on site.
+    // Wire this to a debug Text element ï¿½ you will want it on site.
     public string DebugReadout { get; private set; } = "";
 
     void Start()
     {
         if (postVolume != null && !postVolume.profile.TryGet(out colorAdjustments))
-            Debug.LogWarning("LightingController: Volume has no Color Adjustments override — " +
+            Debug.LogWarning("LightingController: Volume has no Color Adjustments override ï¿½ " +
                              "exposure matching will do nothing.");
 
-        // Flags enum. NOT LightEstimation.EnvironmentalHDR — that member lives on the
+        // Flags enum. NOT LightEstimation.EnvironmentalHDR ï¿½ that member lives on the
         // deprecated LightEstimationMode enum and will not compile here.
         if (cameraManager != null)
             cameraManager.requestedLightEstimation =
@@ -121,7 +132,7 @@ public class LightingController : MonoBehaviour
 
         var le = args.lightEstimation;
 
-        // Sun COLOUR and INTENSITY from estimation — direction stays computed.
+        // Sun COLOUR and INTENSITY from estimation ï¿½ direction stays computed.
         if (sunLight != null)
         {
             if (le.mainLightColor.HasValue)
@@ -131,7 +142,7 @@ public class LightingController : MonoBehaviour
                 sunLight.intensity = le.mainLightIntensityLumens.Value / intensityDivisor;
         }
 
-        // Ambient — the L2 spherical harmonics are the useful part.
+        // Ambient ï¿½ the L2 spherical harmonics are the useful part.
         if (le.ambientSphericalHarmonics.HasValue)
             RenderSettings.ambientProbe = le.ambientSphericalHarmonics.Value;
 
@@ -151,7 +162,8 @@ public class LightingController : MonoBehaviour
 
     void DriveExposure(float averageBrightness)
     {
-        float target = Mathf.Log(Mathf.Max(averageBrightness, 0.001f) / middleGrey, 2f);
+        float rawTarget = Mathf.Log(Mathf.Max(averageBrightness, 0.001f) / middleGrey, 2f);
+        float target = Mathf.Clamp(rawTarget, minExposureEV, maxExposureEV);
 
         // Heavy smoothing: match the camera's SETTLED exposure. Chasing it per frame pumps.
         smoothedExposure = Mathf.Lerp(smoothedExposure, target,
@@ -159,6 +171,14 @@ public class LightingController : MonoBehaviour
 
         if (colorAdjustments != null)
             colorAdjustments.postExposure.value = smoothedExposure;
+
+        if (logExposureSamples && _exposureLogCount < 5)
+        {
+            _exposureLogCount++;
+            Debug.Log($"[Exposure] avgBrightness={averageBrightness:F4} " +
+                      $"rawEV={rawTarget:F2} clampedEV={target:F2} " +
+                      $"smoothed={smoothedExposure:F2}");
+        }
     }
 
     // ------------------------------------------------------ aerial perspective
@@ -169,7 +189,7 @@ public class LightingController : MonoBehaviour
 
         using (image)
         {
-            const int N = 32;                       // downsample hard — this runs on the CPU
+            const int N = 32;                       // downsample hard ï¿½ this runs on the CPU
             var conversion = new XRCpuImage.ConversionParams
             {
                 inputRect = new RectInt(0, 0, image.width, image.height),

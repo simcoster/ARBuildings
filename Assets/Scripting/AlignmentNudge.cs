@@ -2,70 +2,98 @@ using UnityEngine;
 using UnityEngine.InputSystem.EnhancedTouch;
 using Touch = UnityEngine.InputSystem.EnhancedTouch.Touch;
 
+/// <summary>
+/// On-site manual correction (Step 9). VPS gets you close; "close" at building scale still
+/// looks wrong.
+///
+/// The readout is the actual point — align by eye, read off the numbers, then bake them
+/// into buildings.json. PlayerPrefs is a per-user refinement on top of a correct baseline,
+/// not where the authoritative value lives.
+/// </summary>
 public class AlignmentNudge : MonoBehaviour
 {
-    [SerializeField] Transform nudgeRoot;
     [SerializeField] Camera arCamera;
     [SerializeField] float panMetresPerPixel = 0.02f;
 
-    Vector2 prevA, prevB;
-    float prevTwistAngle;
-    bool tracking;
-    string siteKey;
-    bool dirty;
+    Transform _nudgeRoot;      // bound at runtime — the anchor doesn't exist at scene load
+    string _siteKey;
+    bool _dirty;
 
+    Vector2 _prevA, _prevB;
+    float _prevTwistAngle;
+    bool _tracking;
 
-    // Current offsets � read these off the debug UI and bake them into buildings.json
+    // Read these off your debug UI, then bake them into buildings.json.
     public Vector3 PositionOffset { get; private set; }
     public float HeadingOffset { get; private set; }
     public float HeightOffset { get; private set; }
 
-    void OnEnable() { EnhancedTouchSupport.Enable(); }
+    public string DebugReadout =>
+        $"pos {PositionOffset.x:F2}, {PositionOffset.z:F2} m\n" +
+        $"heading {HeadingOffset:+0.0;-0.0}°\n" +
+        $"height {HeightOffset:+0.00;-0.00} m";
+
+    void OnEnable() => EnhancedTouchSupport.Enable();
+
+    void OnDisable()
+    {
+        EnhancedTouchSupport.Disable();
+        if (_dirty) Save();
+    }
+
+    public void Bind(Transform root, string siteId)
+    {
+        _nudgeRoot = root;
+        _siteKey = $"nudge_{siteId}";
+        Load();
+    }
 
     void Update()
     {
-        var touches = Touch.activeTouches;
+        if (_nudgeRoot == null) return;   // anchor not resolved yet — this guard matters
 
-        if (touches.Count != 2) { tracking = false; return; }
+        var touches = Touch.activeTouches;
+        if (touches.Count != 2) { _tracking = false; return; }
 
         Vector2 a = touches[0].screenPosition;
         Vector2 b = touches[1].screenPosition;
         float angle = Mathf.Atan2(b.y - a.y, b.x - a.x) * Mathf.Rad2Deg;
 
-        if (!tracking)
+        if (!_tracking)
         {
-            prevA = a; prevB = b; prevTwistAngle = angle;
-            tracking = true;
+            _prevA = a; _prevB = b; _prevTwistAngle = angle;
+            _tracking = true;
             return;
         }
 
-        // --- twist -> heading ---
-        float dAngle = Mathf.DeltaAngle(prevTwistAngle, angle);
-        if (Mathf.Abs(dAngle) > 0.15f)          // dead zone, twist is noisy
-            HeadingOffset -= dAngle;
+        // twist -> heading, with a dead zone (fingers rotate during any two-finger drag)
+        float dAngle = Mathf.DeltaAngle(_prevTwistAngle, angle);
+        if (Mathf.Abs(dAngle) > 0.15f) HeadingOffset -= dAngle;
 
-        // --- two-finger drag -> pan on the ground plane ---
-        Vector2 centreDelta = ((a + b) - (prevA + prevB)) * 0.5f;
-
+        // two-finger drag -> pan on the ground plane
+        Vector2 centreDelta = ((a + b) - (_prevA + _prevB)) * 0.5f;
         Vector3 fwd = Vector3.ProjectOnPlane(arCamera.transform.forward, Vector3.up).normalized;
         Vector3 right = Vector3.ProjectOnPlane(arCamera.transform.right, Vector3.up).normalized;
 
-        // Scale by distance so it feels 1:1 at whatever range you're standing
-        float dist = Vector3.Distance(arCamera.transform.position, nudgeRoot.position);
+        // Scale by distance so it feels 1:1 at whatever range you're standing.
+        float dist = Vector3.Distance(arCamera.transform.position, _nudgeRoot.position);
         float scale = panMetresPerPixel * Mathf.Clamp(dist / 20f, 0.5f, 4f);
 
         PositionOffset += (right * centreDelta.x + fwd * centreDelta.y) * scale;
 
-        prevA = a; prevB = b; prevTwistAngle = angle;
+        _prevA = a; _prevB = b; _prevTwistAngle = angle;
         Apply();
     }
 
-    public void SetHeight(float metres) { HeightOffset = metres; Apply(); }   // hook to a Slider
+    public void SetHeight(float metres) { HeightOffset = metres; Apply(); }   // wire to a Slider
 
     void Apply()
     {
-        nudgeRoot.localPosition = PositionOffset + Vector3.up * HeightOffset;
-        nudgeRoot.localRotation = Quaternion.Euler(0f, HeadingOffset, 0f);
+        if (_nudgeRoot == null) return;
+
+        _nudgeRoot.localPosition = PositionOffset + Vector3.up * HeightOffset;
+        _nudgeRoot.localRotation = Quaternion.Euler(0f, HeadingOffset, 0f);
+        _dirty = true;
     }
 
     public void ResetNudge()
@@ -74,40 +102,34 @@ public class AlignmentNudge : MonoBehaviour
         HeadingOffset = 0f;
         HeightOffset = 0f;
         Apply();
+        Save();
     }
-    string Key(double lat, double lon) => $"nudge_{lat:F5}_{lon:F5}";
 
     void Load()
     {
         PositionOffset = new Vector3(
-            PlayerPrefs.GetFloat(siteKey + "_x", 0f), 0f,
-            PlayerPrefs.GetFloat(siteKey + "_z", 0f));
-        HeadingOffset = PlayerPrefs.GetFloat(siteKey + "_h", 0f);
-        HeightOffset = PlayerPrefs.GetFloat(siteKey + "_y", 0f);
+            PlayerPrefs.GetFloat(_siteKey + "_x", 0f), 0f,
+            PlayerPrefs.GetFloat(_siteKey + "_z", 0f));
+        HeadingOffset = PlayerPrefs.GetFloat(_siteKey + "_h", 0f);
+        HeightOffset = PlayerPrefs.GetFloat(_siteKey + "_y", 0f);
+
         Apply();
+        _dirty = false;   // freshly loaded values aren't pending changes
     }
-
-
-    public void Bind(Transform root, string siteId)
-    {
-        nudgeRoot = root;
-        siteKey = $"nudge_{siteId}";
-        Load();
-    }
-
 
     void Save()
     {
-        if (siteKey == null) return;
-        PlayerPrefs.SetFloat(siteKey + "_x", PositionOffset.x);
-        PlayerPrefs.SetFloat(siteKey + "_z", PositionOffset.z);
-        PlayerPrefs.SetFloat(siteKey + "_h", HeadingOffset);
-        PlayerPrefs.SetFloat(siteKey + "_y", HeightOffset);
+        if (_siteKey == null) return;
+
+        PlayerPrefs.SetFloat(_siteKey + "_x", PositionOffset.x);
+        PlayerPrefs.SetFloat(_siteKey + "_z", PositionOffset.z);
+        PlayerPrefs.SetFloat(_siteKey + "_h", HeadingOffset);
+        PlayerPrefs.SetFloat(_siteKey + "_y", HeightOffset);
         PlayerPrefs.Save();
-        dirty = false;
+        _dirty = false;
     }
 
-    void OnApplicationPause(bool paused) { if (paused && dirty) Save(); }
-    void OnApplicationFocus(bool focus) { if (!focus && dirty) Save(); }
-    void OnDisable() { if (dirty) Save(); }
+    // Android kills apps without reliably calling OnApplicationQuit.
+    void OnApplicationPause(bool paused) { if (paused && _dirty) Save(); }
+    void OnApplicationFocus(bool focus) { if (!focus && _dirty) Save(); }
 }

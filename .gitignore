@@ -56,3 +56,8 @@ crashlytics-build.properties
 # OS
 .DS_Store
 Thumbs.db
+
+# Unity build byproducts (large, regenerated every build)
+/.utmp/
+/*_BurstDebugInformation_DoNotShip/
+/*_BackUpThisFolder_ButDontShipItWithYourGame/

@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "Authoritative site data. The nudge UI (Step 9) is for finding these numbers on site;",
+    "once found, bake them in HERE. PlayerPrefs is a per-user refinement on top of this",
+    "baseline, not where the real value lives — that's one wipe away from gone.",
+    "Coordinates to 6+ decimal places, from Google Earth Pro or a survey, not a phone GPS.",
+    "headingDeg is the TRUE-north azimuth of the model's front, 0-360 clockwise."
+  ],
+  "buildings": [
+    {
+      "id": "placeholder-01",
+      "name": "Placeholder building",
+      "latitude": 32.083789,
+      "longitude": 34.814581,
+      "altitudeAboveTerrain": 0.0,
+      "headingDeg": 328.0,
+      "modelFrontOffsetDeg": 0.0,
+      "modelUrl": "https://www.googleapis.com/drive/v3/files/FILE_ID?alt=media&key=YOUR_API_KEY"
+    }
+  ]
+}
