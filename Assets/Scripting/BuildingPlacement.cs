@@ -1,28 +1,88 @@
 using UnityEngine;
 
 /// <summary>
-/// The two rotations that decide where the building points (Step 7.5). Keeping them as
-/// separate fields is the whole point: when it's wrong on site you know which one to touch.
+/// Decides where the building points and sits (Step 7.5).
+///
+/// Two ways to specify it:
+///  - a single heading you measured yourself, or
+///  - FOOTPRINT MODE: two corner coordinates along one facade, from which the heading is
+///    derived. That removes the compass, the magnetic-vs-true correction, and the
+///    "N32°W or 347°?" ambiguity, and gives a free scale check.
 /// </summary>
 public class BuildingPlacement : MonoBehaviour
 {
-    [Header("Rotation 1 — where the building faces in the world")]
+    [Header("Footprint mode — two corners along ONE facade")]
+    [Tooltip("Derive the heading from two coordinates instead of measuring it separately.")]
+    [SerializeField] bool useFootprint = false;
+
+    [Tooltip("Corner A. The model is anchored here. 6+ decimal places.")]
+    [SerializeField] double cornerALatitude;
+    [SerializeField] double cornerALongitude;
+
+    [Tooltip("Corner B, along the same facade. A->B must run in the direction of the " +
+             "model's local +X axis (for the placeholder, its 24 m width).")]
+    [SerializeField] double cornerBLatitude;
+    [SerializeField] double cornerBLongitude;
+
+    [Tooltip("Model +Z (its front) relative to the A->B line. -90 puts the front to the " +
+             "RIGHT as you walk A->B. Flip to +90 if it ends up facing the wrong way.")]
+    [SerializeField] float headingOffsetFromABDeg = -90f;
+
+    [Header("Rotation 1 — used only when footprint mode is OFF")]
     [Tooltip("True-north azimuth, degrees clockwise. N32°W = 328.")]
-    [SerializeField] float buildingHeadingDeg = 339.46f;
+    [SerializeField] float buildingHeadingDeg = 328f;
 
     [Header("Rotation 2 — correcting the model's own axes")]
     [Tooltip("Degrees to spin the GLB so its intended front faces local +Z. 0 if exported to spec.")]
     [SerializeField] float modelFrontOffsetDeg = 0f;
 
+    [Header("Origin correction")]
+    [Tooltip("Local offset from the anchor to the model origin, in metres. The placeholder's " +
+             "origin is its REAR corner, so if your corners are on the FRONT facade set " +
+             "Z to minus the building depth (-18.6).")]
+    [SerializeField] Vector3 originOffsetLocal = Vector3.zero;
+
     [Header("Manual on-site nudge (Step 9)")]
-    [Tooltip("Bake the value read off the nudge UI back into buildingHeadingDeg, don't leave it here.")]
+    [Tooltip("Bake the value read off the nudge UI back into the heading, don't leave it here.")]
     [SerializeField] float headingNudgeDeg = 0f;
+
+    /// <summary>Heading actually used: derived from the footprint, or the manual value.</summary>
+    public float EffectiveHeadingDeg =>
+        useFootprint
+            ? Mod360((float)BearingDegrees(cornerALatitude, cornerALongitude,
+                                           cornerBLatitude, cornerBLongitude)
+                     + headingOffsetFromABDeg)
+            : buildingHeadingDeg;
+
+    /// <summary>A->B ground distance. Compare against the model's width as a sanity check.</summary>
+    public double FootprintLengthMetres =>
+        useFootprint
+            ? DistanceMetres(cornerALatitude, cornerALongitude, cornerBLatitude, cornerBLongitude)
+            : 0.0;
+
+    public bool UseFootprint => useFootprint;
+
+    /// <summary>Rotation 2, exposed so preview mode can aim the model's front at the viewer.</summary>
+    public float ModelFrontOffsetDeg => modelFrontOffsetDeg;
+
+    /// <summary>Where the anchor goes when footprint mode is on.</summary>
+    public bool TryGetAnchorLatLng(out double latitude, out double longitude)
+    {
+        latitude = cornerALatitude;
+        longitude = cornerALongitude;
+        return useFootprint;
+    }
+
+    public string PlacementReadout =>
+        useFootprint
+            ? $"heading {EffectiveHeadingDeg:F1}° (from A→B)\nfacade {FootprintLengthMetres:F1} m"
+            : $"heading {EffectiveHeadingDeg:F1}° (manual)";
 
     /// <summary>
     /// Heading -> ARCore EUS (East-Up-South) quaternion. This is the documented conversion.
     /// </summary>
     public Quaternion AnchorRotation =>
-        Quaternion.AngleAxis(180f - (buildingHeadingDeg + headingNudgeDeg), Vector3.up);
+        Quaternion.AngleAxis(180f - (EffectiveHeadingDeg + headingNudgeDeg), Vector3.up);
 
     /// <summary>
     /// Creates the AlignmentRoot the GLB gets instantiated under. Called before the model
@@ -32,8 +92,42 @@ public class BuildingPlacement : MonoBehaviour
     {
         var alignmentRoot = new GameObject("AlignmentRoot").transform;
         alignmentRoot.SetParent(parent, false);
-        alignmentRoot.localPosition = Vector3.zero;
+        alignmentRoot.localPosition = originOffsetLocal;
         alignmentRoot.localRotation = Quaternion.Euler(0f, modelFrontOffsetDeg, 0f);
         return alignmentRoot;
+    }
+
+    // ------------------------------------------------------------------ geodesy
+
+    static float Mod360(float d) => (d % 360f + 360f) % 360f;
+
+    /// <summary>Initial great-circle bearing A->B, degrees clockwise from true north.</summary>
+    public static double BearingDegrees(double lat1, double lon1, double lat2, double lon2)
+    {
+        double p1 = lat1 * Mathf.Deg2Rad;
+        double p2 = lat2 * Mathf.Deg2Rad;
+        double dl = (lon2 - lon1) * Mathf.Deg2Rad;
+
+        double y = System.Math.Sin(dl) * System.Math.Cos(p2);
+        double x = System.Math.Cos(p1) * System.Math.Sin(p2) -
+                   System.Math.Sin(p1) * System.Math.Cos(p2) * System.Math.Cos(dl);
+
+        return (System.Math.Atan2(y, x) * Mathf.Rad2Deg + 360.0) % 360.0;
+    }
+
+    /// <summary>Haversine distance in metres. Plenty accurate at building scale.</summary>
+    public static double DistanceMetres(double lat1, double lon1, double lat2, double lon2)
+    {
+        const double R = 6371000.0;
+        double p1 = lat1 * Mathf.Deg2Rad;
+        double p2 = lat2 * Mathf.Deg2Rad;
+        double dp = (lat2 - lat1) * Mathf.Deg2Rad;
+        double dl = (lon2 - lon1) * Mathf.Deg2Rad;
+
+        double a = System.Math.Sin(dp / 2) * System.Math.Sin(dp / 2) +
+                   System.Math.Cos(p1) * System.Math.Cos(p2) *
+                   System.Math.Sin(dl / 2) * System.Math.Sin(dl / 2);
+
+        return 2 * R * System.Math.Asin(System.Math.Min(1.0, System.Math.Sqrt(a)));
     }
 }

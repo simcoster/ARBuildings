@@ -22,6 +22,16 @@ public class LightingController : MonoBehaviour
     [Tooltip("Lumens -> Unity intensity. Calibrate on device; this is a starting point.")]
     [SerializeField] float intensityDivisor = 1000f;
 
+    [Tooltip("Pin the sun at a fixed mid-morning angle and intensity, ignoring the real " +
+             "solar position and light estimation. For previewing indoors or after dark, " +
+             "where the real sun is below the horizon and the model would render black.")]
+    [SerializeField] bool forceDaylight = false;
+
+    [Tooltip("Elevation and azimuth of the forced sun, degrees.")]
+    [SerializeField] float forcedSunElevation = 45f;
+    [SerializeField] float forcedSunAzimuth = 135f;
+    [SerializeField] float forcedSunIntensity = 1.4f;
+
     [Header("Exposure matching")]
     [SerializeField] bool driveExposure = true;
     [Tooltip("Lower = smoother. Too fast and the model visibly pulses.")]
@@ -93,12 +103,34 @@ public class LightingController : MonoBehaviour
 
     // ---------------------------------------------------------------- sun
 
+    /// <summary>
+    /// Fake daylight, for previewing indoors or at night. Without it the sun is switched
+    /// off below the horizon and the model renders as a black silhouette — which looks
+    /// exactly like a broken placement.
+    /// </summary>
+    public bool ForceDaylight
+    {
+        get => forceDaylight;
+        set { forceDaylight = value; UpdateSun(); }
+    }
+
     void UpdateSun()
     {
         if (sunLight == null) return;
 
-        SolarPosition.Compute(latitude, longitude, System.DateTime.UtcNow,
-                              out float az, out float el);
+        float az, el;
+
+        if (forceDaylight)
+        {
+            az = forcedSunAzimuth;
+            el = forcedSunElevation;
+            sunLight.color = Color.white;
+            sunLight.intensity = forcedSunIntensity;
+        }
+        else
+        {
+            SolarPosition.Compute(latitude, longitude, System.DateTime.UtcNow, out az, out el);
+        }
 
         if (el <= 0f)                       // below the horizon
         {
@@ -133,7 +165,8 @@ public class LightingController : MonoBehaviour
         var le = args.lightEstimation;
 
         // Sun COLOUR and INTENSITY from estimation � direction stays computed.
-        if (sunLight != null)
+        // Forced daylight owns both, or a dim room would immediately undo it.
+        if (sunLight != null && !forceDaylight)
         {
             if (le.mainLightColor.HasValue)
                 sunLight.color = le.mainLightColor.Value;

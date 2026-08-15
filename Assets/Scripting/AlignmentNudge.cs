@@ -12,8 +12,21 @@ using Touch = UnityEngine.InputSystem.EnhancedTouch.Touch;
 /// </summary>
 public class AlignmentNudge : MonoBehaviour
 {
+    public enum Mode { Off, Pan, Rotate }
+
     [SerializeField] Camera arCamera;
     [SerializeField] float panMetresPerPixel = 0.02f;
+
+    [Tooltip("Ignore gestures smaller than this many pixels. Gripping the phone registers " +
+             "as touches; without a threshold the building drifts on its own.")]
+    [SerializeField] float deadZonePixels = 6f;
+
+    /// <summary>
+    /// Editing is OFF until explicitly enabled, and pan/rotate are separate modes.
+    /// Holding a phone produces stray two-finger contacts, and an always-live nudge turns
+    /// those into metres of drift that then get saved to PlayerPrefs.
+    /// </summary>
+    public Mode CurrentMode { get; set; } = Mode.Off;
 
     Transform _nudgeRoot;      // bound at runtime — the anchor doesn't exist at scene load
     string _siteKey;
@@ -51,12 +64,16 @@ public class AlignmentNudge : MonoBehaviour
     void Update()
     {
         if (_nudgeRoot == null) return;   // anchor not resolved yet — this guard matters
+        if (CurrentMode == Mode.Off) { _tracking = false; return; }
 
         var touches = Touch.activeTouches;
-        if (touches.Count != 2) { _tracking = false; return; }
+
+        // One finger is enough now that editing is explicitly armed, and one finger is far
+        // easier to control one-handed than a two-finger twist in bright sun.
+        if (touches.Count < 1) { _tracking = false; return; }
 
         Vector2 a = touches[0].screenPosition;
-        Vector2 b = touches[1].screenPosition;
+        Vector2 b = touches.Count > 1 ? touches[1].screenPosition : a + Vector2.right * 100f;
         float angle = Mathf.Atan2(b.y - a.y, b.x - a.x) * Mathf.Rad2Deg;
 
         if (!_tracking)
@@ -66,20 +83,29 @@ public class AlignmentNudge : MonoBehaviour
             return;
         }
 
-        // twist -> heading, with a dead zone (fingers rotate during any two-finger drag)
-        float dAngle = Mathf.DeltaAngle(_prevTwistAngle, angle);
-        if (Mathf.Abs(dAngle) > 0.15f) HeadingOffset -= dAngle;
+        Vector2 delta = a - _prevA;
+        if (delta.magnitude < deadZonePixels)
+        {
+            _prevA = a; _prevB = b; _prevTwistAngle = angle;
+            return;
+        }
 
-        // two-finger drag -> pan on the ground plane
-        Vector2 centreDelta = ((a + b) - (_prevA + _prevB)) * 0.5f;
-        Vector3 fwd = Vector3.ProjectOnPlane(arCamera.transform.forward, Vector3.up).normalized;
-        Vector3 right = Vector3.ProjectOnPlane(arCamera.transform.right, Vector3.up).normalized;
+        if (CurrentMode == Mode.Rotate)
+        {
+            // Horizontal drag maps to heading — no twist gesture, so no pan/rotate bleed.
+            HeadingOffset += delta.x * 0.25f;
+        }
+        else
+        {
+            Vector3 fwd = Vector3.ProjectOnPlane(arCamera.transform.forward, Vector3.up).normalized;
+            Vector3 right = Vector3.ProjectOnPlane(arCamera.transform.right, Vector3.up).normalized;
 
-        // Scale by distance so it feels 1:1 at whatever range you're standing.
-        float dist = Vector3.Distance(arCamera.transform.position, _nudgeRoot.position);
-        float scale = panMetresPerPixel * Mathf.Clamp(dist / 20f, 0.5f, 4f);
+            // Scale by distance so it feels 1:1 at whatever range you're standing.
+            float dist = Vector3.Distance(arCamera.transform.position, _nudgeRoot.position);
+            float scale = panMetresPerPixel * Mathf.Clamp(dist / 20f, 0.5f, 4f);
 
-        PositionOffset += (right * centreDelta.x + fwd * centreDelta.y) * scale;
+            PositionOffset += (right * delta.x + fwd * delta.y) * scale;
+        }
 
         _prevA = a; _prevB = b; _prevTwistAngle = angle;
         Apply();

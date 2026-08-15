@@ -33,8 +33,23 @@ public class StreetscapeShadowSetup : MonoBehaviour
              "the mesh whose bounds contain this point gets ghosted.")]
     [SerializeField] Transform targetAnchor;
 
+    [Header("Debug visualisation")]
+    [Tooltip("Paint every streetscape mesh translucent so you can see what ARCore serves. " +
+             "The tutorial recommends this as the most reliable alignment reference — " +
+             "Google's mesh of the real building beats eyeballing a facade edge.")]
+    [SerializeField] bool visualiseMeshes = false;
+
+    [Tooltip("AR/StreetscapeDebug material.")]
+    [SerializeField] Material debugMaterial;
+
     readonly Dictionary<TrackableId, MeshRenderer> _renderers = new();
     Transform _container;
+
+    /// <summary>Streetscape meshes currently streamed. 0 outdoors means none arrived.</summary>
+    public int MeshCount => _renderers.Count;
+
+    /// <summary>How many got the ghost material — &gt;1 means merged meshes over-selected.</summary>
+    public int GhostedCount { get; private set; }
 
     // --------------------------------------------------------------- lifecycle
 
@@ -181,9 +196,43 @@ public class StreetscapeShadowSetup : MonoBehaviour
         t.SetPositionAndRotation(pose.position, pose.rotation);
     }
 
+    /// <summary>Flip visualisation at runtime, from the HUD, without a rebuild.</summary>
+    public bool VisualiseMeshes
+    {
+        get => visualiseMeshes;
+        set
+        {
+            if (visualiseMeshes == value) return;
+            visualiseMeshes = value;
+            RefreshAllMaterials();
+        }
+    }
+
+    void RefreshAllMaterials()
+    {
+        foreach (var kv in _renderers)
+        {
+            var geometry = streetscapeManager.GetStreetscapeGeometry(kv.Key);
+            if (geometry != null && kv.Value != null) ApplyMaterial(kv.Value, geometry);
+        }
+    }
+
     void ApplyMaterial(MeshRenderer renderer, ARStreetscapeGeometry geometry)
     {
+        bool wasTarget = renderer.sharedMaterial != null && renderer.sharedMaterial == ghostMaterial;
         bool isTarget = IsTarget(renderer, geometry);
+
+        if (isTarget && !wasTarget) GhostedCount++;
+        else if (!isTarget && wasTarget) GhostedCount--;
+
+        // Visualisation overrides everything — the point is to see the raw geometry.
+        if (visualiseMeshes && debugMaterial != null)
+        {
+            renderer.sharedMaterial = debugMaterial;
+            renderer.shadowCastingMode = ShadowCastingMode.On;
+            renderer.receiveShadows = false;
+            return;
+        }
 
         var material = isTarget ? ghostMaterial : occluderMaterial;
         if (material != null) renderer.sharedMaterial = material;
