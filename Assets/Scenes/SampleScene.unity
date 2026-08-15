@@ -257,6 +257,10 @@ MonoBehaviour:
   longitude: 34.814581
   sunUpdateIntervalSeconds: 60
   intensityDivisor: 1000
+  forceDaylight: 0
+  forcedSunElevation: 45
+  forcedSunAzimuth: 135
+  forcedSunIntensity: 1.4
   driveExposure: 1
   exposureSmoothing: 1.5
   middleGrey: 0.18
@@ -283,6 +287,8 @@ MonoBehaviour:
   ghostMaterial: {fileID: 2100000, guid: 9d3a7e26c8f14b40b2e7d509a4c16f8b, type: 2}
   ghostTargetBuilding: 1
   targetAnchor: {fileID: 0}
+  visualiseMeshes: 0
+  debugMaterial: {fileID: 0}
 --- !u!114 &379862633
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -970,7 +976,13 @@ MonoBehaviour:
   maxYawAccuracy: 15
   debugPlaceWithoutLocalization: 0
   debugPlaceOffset: {x: 0, y: 0, z: 60}
+  previewMode: 0
+  previewViewDistance: 120
+  previewStandoff: 2.5
+  previewEyeHeight: 1.6
+  previewCamera: {fileID: 0}
   logStatus: 1
+  startLocationService: 1
 --- !u!114 &1200000004
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -983,8 +995,15 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 8661306c70c6d8b468c87d38868c4e07, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  useFootprint: 0
+  cornerALatitude: 0
+  cornerALongitude: 0
+  cornerBLatitude: 0
+  cornerBLongitude: 0
+  headingOffsetFromABDeg: -90
   buildingHeadingDeg: 328
   modelFrontOffsetDeg: 0
+  originOffsetLocal: {x: 0, y: 0, z: 0}
   headingNudgeDeg: 0
 --- !u!114 &1200000005
 MonoBehaviour:
@@ -1000,6 +1019,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   arCamera: {fileID: 899767526}
   panMetresPerPixel: 0.02
+  deadZonePixels: 6
 --- !u!114 &1200000006
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1013,8 +1033,10 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   source: 0
-  streamingAssetsFile: placeholder-building.glb
+  streamingAssetsFile: abandoned-house.glb
   modelUrl: 
+  targetHeightMetres: 10
+  modelScale: 1
 --- !u!114 &1200000007
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1030,6 +1052,8 @@ MonoBehaviour:
   geospatial: {fileID: 1200000003}
   nudge: {fileID: 1200000005}
   lighting: {fileID: 379862631}
+  loader: {fileID: 0}
+  streetscape: {fileID: 0}
   heightRange: 5
 --- !u!1660057539 &9223372036854775807
 SceneRoots:

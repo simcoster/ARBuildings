@@ -61,3 +61,6 @@ Thumbs.db
 /.utmp/
 /*_BurstDebugInformation_DoNotShip/
 /*_BackUpThisFolder_ButDontShipItWithYourGame/
+
+# Source art: originals kept out of the build and out of git
+/ModelSource/

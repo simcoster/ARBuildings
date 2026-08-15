@@ -24,12 +24,25 @@ public class BuildingLoader : MonoBehaviour
 
     [SerializeField] ModelSource source = ModelSource.StreamingAssets;
 
-    [Tooltip("File name inside Assets/StreamingAssets, e.g. placeholder-building.glb")]
-    [SerializeField] string streamingAssetsFile = "placeholder-building.glb";
+    [Tooltip("File name inside Assets/StreamingAssets, e.g. abandoned-house.glb")]
+    [SerializeField] string streamingAssetsFile = "abandoned-house.glb";
 
     [Tooltip("Must return binary GLB, not an HTML page. If loading fails, curl -L the URL " +
              "and check the first bytes before blaming glTFast.")]
     [SerializeField] string modelUrl;
+
+    [Header("Sizing")]
+    [Tooltip("Scale the model so its bounding box is this many metres tall, ignoring " +
+             "modelScale. Set this when you don't know the asset's units — AI-generated " +
+             "and asset-store models are usually authored at unit scale, not metres. " +
+             "0 = off.")]
+    [SerializeField] float targetHeightMetres = 10f;
+
+    [Tooltip("Uniform scale, used only when targetHeightMetres is 0.")]
+    [SerializeField] float modelScale = 1f;
+
+    /// <summary>What the sizing step actually did — the HUD reports it.</summary>
+    public float AppliedScale { get; private set; } = 1f;
 
     void Awake() => Instance = this;
 
@@ -86,11 +99,13 @@ public class BuildingLoader : MonoBehaviour
 
         // Models often come in with wrong scale/origin. Normalise here so the alignment
         // hierarchy above is the only thing deciding where the building sits.
+        Transform glbRoot = null;
         if (parent.childCount > 0)
         {
-            var glbRoot = parent.GetChild(0);
+            glbRoot = parent.GetChild(0);
             glbRoot.localPosition = Vector3.zero;
             glbRoot.localRotation = Quaternion.identity;
+            glbRoot.localScale = Vector3.one;
         }
 
         // Zero renderers means the GLB parsed but produced nothing visible — a very
@@ -98,15 +113,52 @@ public class BuildingLoader : MonoBehaviour
         var renderers = parent.GetComponentsInChildren<Renderer>();
         RendererCount = renderers.Length;
 
-        if (renderers.Length > 0)
-        {
-            var b = renderers[0].bounds;
-            foreach (var r in renderers) b.Encapsulate(r.bounds);
-            BoundsSize = b.size;
-        }
+        AppliedScale = ResolveScale(parent, renderers);
+        if (glbRoot != null) glbRoot.localScale = Vector3.one * AppliedScale;
+
+        if (renderers.Length > 0) BoundsSize = MeasureWorldBounds(renderers).size;
 
         State = LoadState.Loaded;
         LastMessage = $"{RendererCount} renderers";
-        Debug.Log($"[Loader] loaded {RendererCount} renderers, bounds {BoundsSize}");
+        Debug.Log($"[Loader] loaded {RendererCount} renderers, scale x{AppliedScale:F3}, " +
+                  $"world bounds {BoundsSize}");
+    }
+
+    static Bounds MeasureWorldBounds(Renderer[] renderers)
+    {
+        var b = renderers[0].bounds;
+        foreach (var r in renderers) b.Encapsulate(r.bounds);
+        return b;
+    }
+
+    /// <summary>
+    /// Works out the uniform scale to apply. Measured in the ALIGNMENT ROOT's space, where
+    /// one unit is one real metre — so a target height stays a real-world height even when
+    /// the whole hierarchy is shrunk, as preview mode shrinks it.
+    /// </summary>
+    float ResolveScale(Transform parent, Renderer[] renderers)
+    {
+        if (targetHeightMetres <= 0f) return modelScale;
+
+        if (renderers.Length == 0)
+        {
+            Debug.LogWarning("[Loader] targetHeightMetres set but the model has no renderers.");
+            return modelScale;
+        }
+
+        float parentScaleY = Mathf.Abs(parent.lossyScale.y);
+        float worldHeight = MeasureWorldBounds(renderers).size.y;
+        float localHeight = parentScaleY > 1e-6f ? worldHeight / parentScaleY : worldHeight;
+
+        if (localHeight <= 1e-6f)
+        {
+            Debug.LogWarning("[Loader] model has zero height — cannot scale to target.");
+            return modelScale;
+        }
+
+        float scale = targetHeightMetres / localHeight;
+        Debug.Log($"[Loader] model is {localHeight:F2} m tall as authored; " +
+                  $"scaling x{scale:F2} to reach {targetHeightMetres} m.");
+        return scale;
     }
 }

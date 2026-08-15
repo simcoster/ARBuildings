@@ -113,8 +113,10 @@ public class DebugHud : MonoBehaviour
         {
             text += $"model: {loader.State}";
             if (loader.State == BuildingLoader.LoadState.Loaded)
-                text += $" ({loader.RendererCount} rend, " +
-                        $"{loader.BoundsSize.x:F0}x{loader.BoundsSize.y:F0}x{loader.BoundsSize.z:F0} m)";
+                // F1, not F0: in preview the model is centimetres tall and F0 renders the
+                // whole thing as "0x0x0", which reads as a broken load.
+                text += $" ({loader.RendererCount} rend, x{loader.AppliedScale:F2}\n" +
+                        $"  {loader.BoundsSize.x:F1}x{loader.BoundsSize.y:F1}x{loader.BoundsSize.z:F1} m)";
             else if (loader.State == BuildingLoader.LoadState.Failed)
                 text += $"\n  {loader.LastMessage}";
             text += "\n\n";
