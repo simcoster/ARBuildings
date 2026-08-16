@@ -1,5 +1,6 @@
 using Google.XR.ARCoreExtensions;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
 
@@ -75,6 +76,19 @@ public class GeospatialController : MonoBehaviour
     [Tooltip("Camera used to position the preview. Falls back to Camera.main.")]
     [SerializeField] Camera previewCamera;
 
+    [Tooltip("AR/ShadowCatcher material. Preview has no ground, so without a surface under " +
+             "the model there is nothing for its shadow to land on and it looks like " +
+             "shadows are broken. Assign Assets/Shaders/ShadowCatcher.mat.")]
+    [SerializeField] Material shadowCatcherMaterial;
+
+    [Tooltip("Size of that invisible ground patch, as a multiple of the model's footprint.")]
+    [SerializeField] float shadowGroundScale = 3f;
+
+    [Tooltip("On placement, size the model so its height is this fraction of the distance " +
+             "to it. 0.5 puts the whole building comfortably on screen and guarantees you " +
+             "are never standing inside it. 0 = never auto-size.")]
+    [SerializeField] float previewFitFraction = 0.5f;
+
     [Tooltip("Echo the status to the log once a second. A poor man's on-screen readout — " +
              "watch it with: adb logcat -s Unity:V")]
     [SerializeField] bool logStatus = true;
@@ -103,6 +117,13 @@ public class GeospatialController : MonoBehaviour
     Transform _previewRoot;
     bool _previewPlacePending;
     float _previewEyeY;   // camera height when the preview was placed, for the base offset
+
+    // Floor placement: the model stands on a tapped point instead of floating at the
+    // eye-level standoff, and the scale ratio is taken from that point's real distance.
+    bool _previewOnFloor;
+    Vector3 _previewFloorPoint;
+    float _previewRefDistance;
+    ARPlaneManager _planeManager;
 
     /// <summary>
     /// Wire this to a debug Text element. Debugging geospatial without visible numbers
@@ -301,11 +322,54 @@ public class GeospatialController : MonoBehaviour
         // saved offsets, which are surveyed values you bake into buildings.json.
         if (nudge != null) nudge.Bind(nudgeRoot, _previewRoot != null ? siteId + "-preview" : siteId);
 
+        // Outdoors the streetscape meshes receive the model's shadow. In preview there is no
+        // ground at all, so one gets made — otherwise the model appears to cast nothing.
+        if (_previewRoot != null) CreateShadowGround(nudgeRoot);
+
         // Nothing to ghost in preview: there is no streetscape geometry indoors, and the
         // miniature's anchor point would land inside whatever mesh happened to exist.
         if (streetscapeShadows != null && _previewRoot == null) streetscapeShadows.SetTarget(anchor);
 
         buildingLoader.LoadInto(alignmentRoot);
+    }
+
+    /// <summary>
+    /// An invisible quad at the model's feet that draws only the shadow falling on it.
+    /// Sized generously, because a low sun throws a shadow far longer than the footprint.
+    /// </summary>
+    void CreateShadowGround(Transform parent)
+    {
+        if (shadowCatcherMaterial == null)
+        {
+            var shader = Shader.Find("AR/ShadowCatcher");
+            if (shader != null) shadowCatcherMaterial = new Material(shader);
+        }
+
+        if (shadowCatcherMaterial == null)
+        {
+            Debug.LogWarning("GeospatialController: no shadow catcher material — the preview " +
+                             "model will cast onto nothing. Assign ShadowCatcher.mat.");
+            return;
+        }
+
+        var ground = GameObject.CreatePrimitive(PrimitiveType.Quad);
+        ground.name = "ShadowGround";
+
+        // The collider would intercept the floor-placement raycast and let the model be
+        // placed on its own shadow plane.
+        Destroy(ground.GetComponent<Collider>());
+
+        ground.transform.SetParent(parent, false);
+        ground.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);   // quad faces +Z, we need +Y
+
+        // In alignment-root space one unit is one metre, so this is metres of real building.
+        float span = Mathf.Max(1f, shadowGroundScale * 30f);
+        ground.transform.localScale = new Vector3(span, span, 1f);
+
+        var renderer = ground.GetComponent<MeshRenderer>();
+        renderer.sharedMaterial = shadowCatcherMaterial;
+        renderer.shadowCastingMode = ShadowCastingMode.Off;   // a receiver, never a caster
+        renderer.receiveShadows = true;
     }
 
     // ------------------------------------------------------------------ preview
@@ -331,7 +395,9 @@ public class GeospatialController : MonoBehaviour
         _previewRoot == null
             ? ""
             : $"PREVIEW: as seen from {previewViewDistance:F0} m\n" +
-              $"  {previewStandoff:F1} m away at 1:{(previewViewDistance / Mathf.Max(0.01f, previewStandoff)):F0}";
+              $"  {(_previewOnFloor ? "on floor" : "eye level")} " +
+              $"{_previewRefDistance:F1} m away " +
+              $"at 1:{(previewViewDistance / Mathf.Max(0.01f, _previewRefDistance)):F0}";
 
     /// <summary>HUD toggle. Tears down whichever placement is up and builds the other.</summary>
     public void SetPreview(bool on)
@@ -349,6 +415,8 @@ public class GeospatialController : MonoBehaviour
         TearDownHierarchy();
 
         _previewRoot = new GameObject("PreviewRoot").transform;
+        _previewOnFloor = false;
+        _previewRefDistance = previewStandoff;
 
         // Placement happens next frame, once the AR camera has a pose; do it now too so a
         // single-frame flash doesn't show it at full size on top of the viewer.
@@ -413,6 +481,14 @@ public class GeospatialController : MonoBehaviour
         var cam = PreviewCamera;
         if (cam == null) return;
 
+        // Recentring always returns to the eye-level standoff, undoing a floor placement.
+        _previewOnFloor = false;
+        _previewRefDistance = previewStandoff;
+
+        // Same guarantee as a floor tap: whatever the slider says, the model ends up a size
+        // you can actually see all of.
+        FitPreviewToView();
+
         float scale = PreviewScale;
 
         Vector3 forward = Vector3.ProjectOnPlane(cam.transform.forward, Vector3.up);
@@ -431,7 +507,13 @@ public class GeospatialController : MonoBehaviour
         _previewRoot.SetPositionAndRotation(position, facing);
     }
 
-    float PreviewScale => previewStandoff / Mathf.Max(1f, previewViewDistance);
+    /// <summary>
+    /// Apparent size is the whole point: a model this many times smaller, at the distance
+    /// it actually sits, subtends exactly the angle the real building would from
+    /// previewViewDistance away.
+    /// </summary>
+    float PreviewScale =>
+        Mathf.Max(0.01f, _previewRefDistance) / Mathf.Max(1f, previewViewDistance);
 
     void ApplyPreviewScale()
     {
@@ -439,10 +521,156 @@ public class GeospatialController : MonoBehaviour
 
         _previewRoot.localScale = Vector3.one * PreviewScale;
 
-        // Only the height is re-derived: the model must not jump sideways while you drag
-        // the distance slider, and standoff is fixed, so a distance change is a size change.
+        // The model must not jump sideways while you drag the distance slider. Standing on
+        // the floor it doesn't move at all; floating at eye level only its height is
+        // re-derived, because the base offset depends on scale.
+        if (_previewOnFloor)
+        {
+            _previewRoot.position = _previewFloorPoint;
+            return;
+        }
+
         var p = _previewRoot.position;
         p.y = _previewEyeY - previewEyeHeight * PreviewScale;
         _previewRoot.position = p;
+    }
+
+    // -------------------------------------------------------- tap the floor to place
+
+    /// <summary>
+    /// Stands the model on the floor at the tapped point. The scale ratio is rebuilt from
+    /// how far away that point actually is, so "as seen from N metres" still holds however
+    /// near or far you put it.
+    /// </summary>
+    public bool TryPlacePreviewAt(Vector2 screenPosition)
+    {
+        if (_previewRoot == null) return false;
+
+        var cam = PreviewCamera;
+        if (cam == null) return false;
+
+        var ray = cam.ScreenPointToRay(screenPosition);
+
+        if (!TryRaycastPlanes(ray, out Vector3 point) &&
+            !TryRaycastAssumedFloor(cam, ray, out point))
+            return false;
+
+        _previewOnFloor = true;
+        _previewFloorPoint = point;
+        _previewRefDistance = Vector3.Distance(cam.transform.position, point);
+
+        // A saved pan/height offset from an earlier session rides on NudgeRoot and can put
+        // the model under the floor or off to one side, which looks exactly like a failed
+        // placement. An explicit "put it there" should mean exactly that.
+        if (nudge != null) nudge.ResetNudge();
+
+        FitPreviewToView();
+
+        Vector3 toCamera = Vector3.ProjectOnPlane(cam.transform.position - point, Vector3.up);
+        if (toCamera.sqrMagnitude < 1e-4f) toCamera = -cam.transform.forward;
+
+        _previewRoot.localScale = Vector3.one * PreviewScale;
+        _previewRoot.SetPositionAndRotation(
+            point,
+            Quaternion.LookRotation(toCamera.normalized, Vector3.up) *
+            Quaternion.Euler(0f, -placement.ModelFrontOffsetDeg, 0f));
+
+        Debug.Log($"[Preview] placed on floor {_previewRefDistance:F2} m away, " +
+                  $"scale 1:{(previewViewDistance / Mathf.Max(0.01f, _previewRefDistance)):F0}");
+        return true;
+    }
+
+    /// <summary>
+    /// Raises the pretend viewing distance until the model fits in view at the distance it
+    /// is actually sitting. Without this, tapping a spot 1.5 m away with the slider near its
+    /// 10 m minimum gives 1:7 — a 10 m building rendered 1.4 m tall in your face.
+    /// Only ever increases it, so a deliberately distant setting is left alone.
+    /// </summary>
+    void FitPreviewToView()
+    {
+        if (previewFitFraction <= 0f) return;
+
+        float height = buildingLoader != null ? buildingLoader.ModelHeightMetres : 0f;
+        if (height <= 0.01f) return;   // model still loading — the slider stays in charge
+
+        // scale = standoff / viewDistance, and we want height * scale <= standoff * fraction.
+        // The standoff cancels: how big it looks depends only on height and view distance.
+        float needed = height / previewFitFraction;
+
+        if (previewViewDistance >= needed) return;
+
+        Debug.Log($"[Preview] fitting {height:F1} m model to view: " +
+                  $"distance {previewViewDistance:F0} -> {needed:F0} m");
+
+        previewViewDistance = needed;
+    }
+
+    /// <summary>
+    /// Hits ARCore's detected horizontal planes. Done by hand because the scene has an
+    /// ARPlaneManager but no ARRaycastManager, and this needs no new scene wiring.
+    /// </summary>
+    bool TryRaycastPlanes(Ray ray, out Vector3 point)
+    {
+        point = default;
+
+        if (_planeManager == null) _planeManager = FindAnyObjectByType<ARPlaneManager>();
+        if (_planeManager == null) return false;
+
+        float nearest = float.MaxValue;
+        bool found = false;
+
+        foreach (var plane in _planeManager.trackables)
+        {
+            if (plane == null) continue;
+            if (plane.alignment != PlaneAlignment.HorizontalUp) continue;
+
+            var mathPlane = new Plane(plane.transform.up, plane.transform.position);
+            if (!mathPlane.Raycast(ray, out float distance) || distance >= nearest) continue;
+
+            // The infinite plane is not the plane: a tap past the rug's edge should miss.
+            Vector3 hit = ray.GetPoint(distance);
+            Vector3 local = plane.transform.InverseTransformPoint(hit);
+            if (!InsideBoundary(plane, new Vector2(local.x, local.z))) continue;
+
+            nearest = distance;
+            point = hit;
+            found = true;
+        }
+
+        return found;
+    }
+
+    static bool InsideBoundary(ARPlane plane, Vector2 local)
+    {
+        var boundary = plane.boundary;
+        if (boundary.Length < 3) return false;
+
+        // Standard crossing count: walk the polygon edges and count how many the ray crosses.
+        bool inside = false;
+        for (int i = 0, j = boundary.Length - 1; i < boundary.Length; j = i++)
+        {
+            Vector2 a = boundary[i], b = boundary[j];
+            if (a.y > local.y == b.y > local.y) continue;
+            if (local.x < (b.x - a.x) * (local.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+        }
+
+        return inside;
+    }
+
+    /// <summary>
+    /// Fallback for when ARCore hasn't found a plane yet — assume the floor is one eye
+    /// height below the camera. Wrong if you're sitting, but it always answers.
+    /// </summary>
+    bool TryRaycastAssumedFloor(Camera cam, Ray ray, out Vector3 point)
+    {
+        point = default;
+
+        var floor = new Plane(Vector3.up,
+                              new Vector3(0f, cam.transform.position.y - previewEyeHeight, 0f));
+
+        if (!floor.Raycast(ray, out float distance) || distance <= 0f) return false;
+
+        point = ray.GetPoint(distance);
+        return true;
     }
 }

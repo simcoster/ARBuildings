@@ -288,7 +288,7 @@ MonoBehaviour:
   ghostTargetBuilding: 1
   targetAnchor: {fileID: 0}
   visualiseMeshes: 0
-  debugMaterial: {fileID: 0}
+  debugMaterial: {fileID: 2100000, guid: 7c3a9e51d284b64f8a0f2b7e35c19d06, type: 2}
 --- !u!114 &379862633
 MonoBehaviour:
   m_ObjectHideFlags: 0

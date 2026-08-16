@@ -64,6 +64,40 @@ public class LightingController : MonoBehaviour
     // Wire this to a debug Text element � you will want it on site.
     public string DebugReadout { get; private set; } = "";
 
+    // ------------------------------------------------- what ARCore actually reports
+
+    /// <summary>
+    /// Direction the estimated main light TRAVELS (light -> scene), matching Unity's
+    /// convention for Light.transform.forward. Negate it to point at the source.
+    /// Null until an estimated frame arrives.
+    /// </summary>
+    public Vector3? EstimatedLightTravel { get; private set; }
+
+    public float EstimatedLumens { get; private set; }
+    public Color EstimatedColour { get; private set; } = Color.white;
+
+    /// <summary>Solar position we compute ourselves, for comparison against the estimate.</summary>
+    public float SolarAzimuthDeg { get; private set; }
+    public float SolarElevationDeg { get; private set; }
+
+    /// <summary>Where the ambient probe says most of the light energy comes from.</summary>
+    public Vector3 AmbientPeakDirection { get; private set; } = Vector3.up;
+
+    /// <summary>
+    /// Distinct bright lobes in the ambient probe. See <see cref="AnalyseAmbient"/> for why
+    /// this can never resolve individual lamps.
+    /// </summary>
+    public int AmbientLobeCount { get; private set; }
+
+    /// <summary>Peak-to-average ratio of the ambient probe. ~1 = flat, higher = directional.</summary>
+    public float AmbientDirectionality { get; private set; } = 1f;
+
+    // A fixed direction set, sampled once, so the probe analysis allocates nothing per frame.
+    static Vector3[] _sampleDirections;
+    Color[] _sampleColours;
+    float[] _sampleLuma;
+    float _ambientTimer;
+
     void Start()
     {
         if (postVolume != null && !postVolume.profile.TryGet(out colorAdjustments))
@@ -99,6 +133,105 @@ public class LightingController : MonoBehaviour
             sunTimer = 0f;
             UpdateSun();
         }
+
+        // Twice a second is ample — the probe itself is heavily smoothed by ARCore.
+        _ambientTimer += Time.deltaTime;
+        if (_ambientTimer >= 0.5f)
+        {
+            _ambientTimer = 0f;
+            AnalyseAmbient();
+        }
+    }
+
+    // ------------------------------------------------------- ambient probe analysis
+
+    /// <summary>
+    /// Directions the probe is sampled in, spread evenly over the sphere by the Fibonacci
+    /// spiral. Shared and built once — the visualiser reads the same set.
+    /// </summary>
+    public static Vector3[] SampleDirections
+    {
+        get
+        {
+            if (_sampleDirections != null) return _sampleDirections;
+
+            const int count = 64;
+            _sampleDirections = new Vector3[count];
+            float golden = Mathf.PI * (3f - Mathf.Sqrt(5f));
+
+            for (int i = 0; i < count; i++)
+            {
+                float y = 1f - i / (count - 1f) * 2f;
+                float radius = Mathf.Sqrt(Mathf.Max(0f, 1f - y * y));
+                float theta = golden * i;
+                _sampleDirections[i] =
+                    new Vector3(Mathf.Cos(theta) * radius, y, Mathf.Sin(theta) * radius);
+            }
+
+            return _sampleDirections;
+        }
+    }
+
+    /// <summary>Per-direction irradiance from the last analysis, for the debug view.</summary>
+    public Color[] SampleColours => _sampleColours;
+
+    /// <summary>
+    /// Reconstructs irradiance from the ambient spherical harmonics and looks for bright
+    /// lobes.
+    ///
+    /// This CANNOT resolve individual light sources. ARCore reports order-2 spherical
+    /// harmonics — 9 coefficients per channel — which is a deliberately very low-frequency
+    /// description of the environment. Two lamps less than about 60 degrees apart blur into
+    /// one lobe no matter how distinct they really are. Treat the count as "is the lighting
+    /// directional or wrapped-around", not as a light inventory.
+    /// </summary>
+    void AnalyseAmbient()
+    {
+        var directions = SampleDirections;
+
+        _sampleColours ??= new Color[directions.Length];
+        _sampleLuma ??= new float[directions.Length];
+
+        RenderSettings.ambientProbe.Evaluate(directions, _sampleColours);
+
+        float peak = 0f, sum = 0f;
+        int peakIndex = 0;
+
+        for (int i = 0; i < directions.Length; i++)
+        {
+            var c = _sampleColours[i];
+            float luma = c.r * 0.2126f + c.g * 0.7152f + c.b * 0.0722f;
+            _sampleLuma[i] = luma;
+            sum += luma;
+
+            if (luma > peak) { peak = luma; peakIndex = i; }
+        }
+
+        float average = sum / directions.Length;
+        AmbientPeakDirection = directions[peakIndex];
+        AmbientDirectionality = average > 1e-6f ? peak / average : 1f;
+
+        // A lobe is a sample brighter than 75% of peak whose neighbours within 50 degrees
+        // are all dimmer — i.e. a local maximum, not a point on the shoulder of one.
+        int lobes = 0;
+        float threshold = peak * 0.75f;
+
+        for (int i = 0; i < directions.Length; i++)
+        {
+            if (_sampleLuma[i] < threshold) continue;
+
+            bool isLocalMax = true;
+            for (int k = 0; k < directions.Length && isLocalMax; k++)
+            {
+                if (k == i) continue;
+                if (Vector3.Dot(directions[i], directions[k]) < 0.64f) continue;   // >50 deg
+                if (_sampleLuma[k] > _sampleLuma[i]) isLocalMax = false;
+            }
+
+            if (isLocalMax) lobes++;
+        }
+
+        AmbientLobeCount = lobes;
     }
 
     // ---------------------------------------------------------------- sun
@@ -132,6 +265,9 @@ public class LightingController : MonoBehaviour
             SolarPosition.Compute(latitude, longitude, System.DateTime.UtcNow, out az, out el);
         }
 
+        SolarAzimuthDeg = az;
+        SolarElevationDeg = el;
+
         if (el <= 0f)                       // below the horizon
         {
             sunLight.enabled = false;
@@ -163,6 +299,13 @@ public class LightingController : MonoBehaviour
         }
 
         var le = args.lightEstimation;
+
+        // Recorded but NOT applied: the sun's direction stays computed from the site's real
+        // solar position, which is far more reliable than a single-frame estimate. Keeping
+        // the estimate lets the debug view show how far apart the two are.
+        if (le.mainLightDirection.HasValue) EstimatedLightTravel = le.mainLightDirection.Value;
+        if (le.mainLightIntensityLumens.HasValue) EstimatedLumens = le.mainLightIntensityLumens.Value;
+        if (le.mainLightColor.HasValue) EstimatedColour = le.mainLightColor.Value;
 
         // Sun COLOUR and INTENSITY from estimation � direction stays computed.
         // Forced daylight owns both, or a dim room would immediately undo it.

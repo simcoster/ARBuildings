@@ -45,6 +45,19 @@ public class StreetscapeShadowSetup : MonoBehaviour
     readonly Dictionary<TrackableId, MeshRenderer> _renderers = new();
     Transform _container;
 
+    /// <summary>How the ghosted mesh is chosen.</summary>
+    public enum GhostSelection
+    {
+        /// <summary>Whichever building mesh's bounds contain the anchor. Guesses.</summary>
+        AutoFromAnchor,
+
+        /// <summary>Whichever mesh you tapped. Doesn't guess.</summary>
+        Manual,
+    }
+
+    public GhostSelection SelectionMode { get; private set; } = GhostSelection.AutoFromAnchor;
+    TrackableId _selectedId;
+
     /// <summary>Streetscape meshes currently streamed. 0 outdoors means none arrived.</summary>
     public int MeshCount => _renderers.Count;
 
@@ -196,6 +209,13 @@ public class StreetscapeShadowSetup : MonoBehaviour
         t.SetPositionAndRotation(pose.position, pose.rotation);
     }
 
+    /// <summary>
+    /// True when visualisation is asked for but can't happen. Without this the toggle is a
+    /// button that silently does nothing, which reads as a broken feature rather than an
+    /// unassigned inspector field.
+    /// </summary>
+    public bool DebugMaterialMissing => visualiseMeshes && debugMaterial == null;
+
     /// <summary>Flip visualisation at runtime, from the HUD, without a rebuild.</summary>
     public bool VisualiseMeshes
     {
@@ -204,6 +224,12 @@ public class StreetscapeShadowSetup : MonoBehaviour
         {
             if (visualiseMeshes == value) return;
             visualiseMeshes = value;
+
+            if (visualiseMeshes && debugMaterial == null)
+                Debug.LogWarning("StreetscapeShadowSetup: mesh visualisation is on but no " +
+                                 "debug material is assigned — assign AR/StreetscapeDebug to " +
+                                 "XR Origin > Streetscape Shadow Setup > Debug Material.");
+
             RefreshAllMaterials();
         }
     }
@@ -246,11 +272,139 @@ public class StreetscapeShadowSetup : MonoBehaviour
 
     bool IsTarget(MeshRenderer renderer, ARStreetscapeGeometry geometry)
     {
-        if (!ghostTargetBuilding || targetAnchor == null) return false;
+        if (!ghostTargetBuilding) return false;
+
+        // An explicit tap beats any heuristic — and it is not restricted to Building meshes,
+        // because if you deliberately tapped a terrain mesh you probably meant to.
+        if (SelectionMode == GhostSelection.Manual)
+            return geometry.trackableId == _selectedId;
+
+        if (targetAnchor == null) return false;
         if (geometry.streetscapeGeometryType != StreetscapeGeometryType.Building) return false;
 
-        // Crude: streetscape meshes are often merged across several buildings, so this can
-        // ghost more than intended. A manual tap-to-select is more reliable if that happens.
+        // Crude: streetscape meshes are often merged across several buildings, and an
+        // axis-aligned box around a diagonal footprint swallows the street next to it. The
+        // anchor also sits at a facade CORNER at ground level — right on the boundary of the
+        // box being tested — so this misses as easily as it over-selects. Hence tap-to-select.
         return renderer.bounds.Contains(targetAnchor.position);
+    }
+
+    // ------------------------------------------------------------- tap to select
+
+    public string SelectionReadout =>
+        SelectionMode == GhostSelection.Manual
+            ? $"ghost: tapped ({GhostedCount})"
+            : $"ghost: auto ({GhostedCount})";
+
+    /// <summary>Back to picking by anchor containment.</summary>
+    public void ClearSelection()
+    {
+        if (SelectionMode == GhostSelection.AutoFromAnchor) return;
+
+        SelectionMode = GhostSelection.AutoFromAnchor;
+        _selectedId = default;
+        RefreshAllMaterials();
+    }
+
+    /// <summary>
+    /// Ghosts the nearest streetscape mesh under the ray. Intersection is done by hand
+    /// rather than with Physics.Raycast: that would need a MeshCollider on every geometry,
+    /// re-baked every time ARCore updates it, which is a per-frame cost for something that
+    /// only has to work at the moment of a tap.
+    /// </summary>
+    public bool TrySelectAt(Ray ray)
+    {
+        float best = float.MaxValue;
+        TrackableId bestId = default;
+        bool found = false;
+
+        foreach (var kv in _renderers)
+        {
+            var renderer = kv.Value;
+            if (renderer == null) continue;
+
+            // Cheap reject first — the bounds test is the AABB, which is wrong for picking
+            // but perfectly good for "this mesh is nowhere near the ray, skip it".
+            if (!renderer.bounds.IntersectRay(ray)) continue;
+
+            var filter = renderer.GetComponent<MeshFilter>();
+            var mesh = filter != null ? filter.sharedMesh : null;
+            if (mesh == null) continue;
+
+            if (RaycastMesh(ray, mesh, renderer.transform, out float distance) && distance < best)
+            {
+                best = distance;
+                bestId = kv.Key;
+                found = true;
+            }
+        }
+
+        if (!found) return false;
+
+        _selectedId = bestId;
+        SelectionMode = GhostSelection.Manual;
+        RefreshAllMaterials();
+
+        Debug.Log($"[Streetscape] ghosting tapped mesh {bestId} at {best:F1} m");
+        return true;
+    }
+
+    static bool RaycastMesh(Ray worldRay, Mesh mesh, Transform t, out float distance)
+    {
+        distance = float.MaxValue;
+
+        // Streetscape objects are placed at world poses with no scaling, so a distance
+        // measured in local space is already metres.
+        Vector3 origin = t.InverseTransformPoint(worldRay.origin);
+        Vector3 direction = t.InverseTransformDirection(worldRay.direction);
+
+        var vertices = mesh.vertices;
+        var triangles = mesh.triangles;
+        bool hit = false;
+
+        for (int i = 0; i < triangles.Length; i += 3)
+        {
+            if (RayTriangle(origin, direction,
+                            vertices[triangles[i]],
+                            vertices[triangles[i + 1]],
+                            vertices[triangles[i + 2]],
+                            out float d) && d < distance)
+            {
+                distance = d;
+                hit = true;
+            }
+        }
+
+        return hit;
+    }
+
+    /// <summary>
+    /// Möller–Trumbore, deliberately double-sided: streetscape meshes are not reliably
+    /// wound outward, which is also why the debug shader draws with Cull Off.
+    /// </summary>
+    static bool RayTriangle(Vector3 origin, Vector3 direction,
+                            Vector3 a, Vector3 b, Vector3 c, out float distance)
+    {
+        const float epsilon = 1e-7f;
+        distance = 0f;
+
+        Vector3 ab = b - a, ac = c - a;
+        Vector3 p = Vector3.Cross(direction, ac);
+        float det = Vector3.Dot(ab, p);
+
+        if (det > -epsilon && det < epsilon) return false;   // ray parallel to the triangle
+
+        float inv = 1f / det;
+        Vector3 s = origin - a;
+
+        float u = Vector3.Dot(s, p) * inv;
+        if (u < 0f || u > 1f) return false;
+
+        Vector3 q = Vector3.Cross(s, ab);
+        float v = Vector3.Dot(direction, q) * inv;
+        if (v < 0f || u + v > 1f) return false;
+
+        distance = Vector3.Dot(ac, q) * inv;
+        return distance > epsilon;
     }
 }

@@ -1,4 +1,7 @@
 using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.EnhancedTouch;
+using Touch = UnityEngine.InputSystem.EnhancedTouch.Touch;
 
 /// <summary>
 /// On-screen diagnostics and nudge controls for on-site work (Steps 9 and 12).
@@ -22,6 +25,16 @@ public class DebugHud : MonoBehaviour
     float _height;
     GUIStyle _label, _button, _box;
 
+    /// <summary>What the next tap on the world will do. Armed by a button, fires once.</summary>
+    enum TapAction { None, GhostStreetscape, PlacePreview }
+
+    // Armed explicitly and cleared after one tap, so a stray touch while walking can't
+    // silently re-ghost a building or teleport the model.
+    TapAction _tapAction = TapAction.None;
+    int _armedOnFrame;
+    string _tapResult = "";
+    bool _showLight;
+
     void Awake()
     {
         // Auto-wire so there is nothing to forget in the inspector.
@@ -30,6 +43,66 @@ public class DebugHud : MonoBehaviour
         if (lighting == null) lighting = FindAnyObjectByType<LightingController>();
         if (loader == null) loader = FindAnyObjectByType<BuildingLoader>();
         if (streetscape == null) streetscape = FindAnyObjectByType<StreetscapeShadowSetup>();
+    }
+
+    // AlignmentNudge enables this too; the support is reference-counted, so both can.
+    //
+    // onFingerDown is an EVENT, not a poll. Polling activeTouches for phase == Began misses
+    // any tap quick enough to begin and end between two Update calls — at 30 fps that is
+    // most normal taps, which showed up as the button working about one time in six.
+    void OnEnable()
+    {
+        EnhancedTouchSupport.Enable();
+        Touch.onFingerDown += OnFingerDown;
+    }
+
+    void OnDisable()
+    {
+        Touch.onFingerDown -= OnFingerDown;
+        EnhancedTouchSupport.Disable();
+    }
+
+    Vector2? _pendingTap;
+
+    void OnFingerDown(Finger finger) => _pendingTap = finger.screenPosition;
+
+    void Update()
+    {
+        if (_tapAction == TapAction.None) { _pendingTap = null; return; }
+
+        // Ignore the frame the arming button was pressed on, or that press acts as the tap.
+        if (Time.frameCount <= _armedOnFrame + 1) { _pendingTap = null; return; }
+
+        Vector2? point = _pendingTap;
+        _pendingTap = null;
+
+        // Editor convenience — there is no touchscreen on a desktop.
+        if (point == null && Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame)
+            point = Mouse.current.position.ReadValue();
+
+        if (point == null) return;
+
+        var action = _tapAction;
+        _tapAction = TapAction.None;
+
+        var cam = Camera.main;
+        if (cam == null) { _tapResult = "no camera"; return; }
+
+        if (action == TapAction.GhostStreetscape)
+        {
+            _tapResult = streetscape != null &&
+                         streetscape.TrySelectAt(cam.ScreenPointToRay(point.Value))
+                ? "ghosted"
+                : "nothing under that tap";
+        }
+        else
+        {
+            bool placed = geospatial != null && geospatial.TryPlacePreviewAt(point.Value);
+            _tapResult = placed ? "placed" : "no floor under that tap";
+
+            // Placement clears the nudge, so the slider must not keep showing an old offset.
+            if (placed) _height = 0f;
+        }
     }
 
     /// <summary>
@@ -123,8 +196,19 @@ public class DebugHud : MonoBehaviour
         }
 
         if (streetscape != null)
-            text += $"streetscape: {streetscape.MeshCount} meshes, " +
-                    $"{streetscape.GhostedCount} ghosted\n\n";
+        {
+            text += $"streetscape: {streetscape.MeshCount} meshes\n" +
+                    $"  {streetscape.SelectionReadout}\n";
+
+            if (streetscape.DebugMaterialMissing)
+                text += "  NO DEBUG MATERIAL — assign it on XR Origin\n";
+
+            if (_tapAction == TapAction.GhostStreetscape)
+                text += "  TAP A BUILDING TO GHOST IT\n";
+            else if (_tapResult != "") text += $"  tap: {_tapResult}\n";
+
+            text += "\n";
+        }
 
         var placement = geospatial != null ? geospatial.GetComponent<BuildingPlacement>() : null;
         if (placement != null) text += placement.PlacementReadout + "\n\n";
@@ -151,6 +235,41 @@ public class DebugHud : MonoBehaviour
                        streetscape.VisualiseMeshes ? "mesh ON" : "mesh", _button))
             streetscape.VisualiseMeshes = !streetscape.VisualiseMeshes;
 
+        // --- tap to pick the ghosted building ---
+        if (streetscape != null)
+        {
+            bool armed = _tapAction == TapAction.GhostStreetscape;
+            var tapBg = GUI.backgroundColor;
+            if (armed) GUI.backgroundColor = Color.yellow;
+
+            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 2.4f, w * 0.22f, btnH),
+                           armed ? "tap..." : "pick", _button))
+                ArmTap(armed ? TapAction.None : TapAction.GhostStreetscape);
+
+            GUI.backgroundColor = tapBg;
+
+            // Only offered once a tap has overridden the automatic choice.
+            if (streetscape.SelectionMode == StreetscapeShadowSetup.GhostSelection.Manual &&
+                GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 3.6f, w * 0.22f, btnH),
+                           "auto", _button))
+                streetscape.ClearSelection();
+        }
+
+        // --- light estimation dome ---
+        if (lighting != null)
+        {
+            var lightBg = GUI.backgroundColor;
+            if (_showLight) GUI.backgroundColor = Color.cyan;
+
+            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 4.8f, w * 0.22f, btnH),
+                           "light", _button))
+                _showLight = !_showLight;
+
+            GUI.backgroundColor = lightBg;
+
+            if (_showLight) DrawLightDome(w, pad, btnH);
+        }
+
         DrawPreviewControls(w, pad, btnH);
 
         if (nudge == null) return;
@@ -174,9 +293,11 @@ public class DebugHud : MonoBehaviour
         }
 
         // --- height slider: vertical, right edge, thumb-reachable ---
+        // Starts below the whole right-hand button stack. IMGUI gives earlier controls the
+        // event first, so any overlap would leave the slider dead where a button covers it.
         float sliderX = w - pad - w * 0.1f;
-        float sliderY = pad + btnH + pad;
-        float sliderH = Screen.height * 0.4f;
+        float sliderY = pad + btnH * 6f;
+        float sliderH = Screen.height * 0.34f;
 
         GUI.Label(new Rect(sliderX - w * 0.02f, sliderY - btnH, w * 0.2f, btnH),
                   $"height {_height:+0.00;-0.00}", _label);
@@ -208,7 +329,10 @@ public class DebugHud : MonoBehaviour
         if (geospatial == null) return;
 
         bool active = geospatial.PreviewActive;
-        float y = Screen.height * 0.6f;
+
+        // Sits between the info box (top 46%) and the edit-mode row (~84%). The block is
+        // four rows tall when preview is on, so it starts high enough to clear both.
+        float y = Screen.height * 0.54f;
         float btnW = w * 0.3f;
 
         var prevBg = GUI.backgroundColor;
@@ -258,5 +382,149 @@ public class DebugHud : MonoBehaviour
         if (!Mathf.Approximately(newT, t))
             geospatial.PreviewViewDistance =
                 Mathf.Exp(Mathf.Lerp(Mathf.Log(10f), Mathf.Log(400f), newT));
+
+        // --- stand it on the floor where you tap ---
+        bool placing = _tapAction == TapAction.PlacePreview;
+        float placeY = sliderY + btnH * 2.4f;
+
+        var placeBg = GUI.backgroundColor;
+        if (placing) GUI.backgroundColor = Color.yellow;
+
+        if (GUI.Button(new Rect(pad, placeY, btnW * 1.4f, btnH),
+                       placing ? "tap the floor..." : "place on floor", _button))
+            ArmTap(placing ? TapAction.None : TapAction.PlacePreview);
+
+        GUI.backgroundColor = placeBg;
+
+        if (_tapResult != "" && !placing)
+            GUI.Label(new Rect(pad * 1.4f + btnW * 1.4f, placeY, w * 0.4f, btnH),
+                      _tapResult, _label);
+    }
+
+    /// <summary>
+    /// A sky dome seen from above: centre is straight up, the rim is the horizon, north is
+    /// up-screen. Plots where ARCore thinks the light comes from against where the sun
+    /// actually is, over a ring showing the ambient probe's energy by direction.
+    /// </summary>
+    void DrawLightDome(float w, float pad, float btnH)
+    {
+        if (lighting == null) return;
+
+        // Right edge stops short of the vertical height slider's column, and it starts below
+        // the right-hand button stack. It does overlay the info box while shown — that's the
+        // trade for a chart big enough to read in sunlight, and it's one tap to dismiss.
+        float size = w * 0.34f;
+        float x = w - pad - w * 0.13f - size;
+        float y = pad + btnH * 6f;
+        float cx = x + size * 0.5f, cy = y + size * 0.5f;
+        float radius = size * 0.42f;
+
+        var prev = GUI.color;
+
+        GUI.color = new Color(0f, 0f, 0f, 0.55f);
+        GUI.DrawTexture(new Rect(x, y, size, size), Texture2D.whiteTexture);
+
+        // --- ambient probe, drawn as a ring of cells around the rim ---
+        var directions = LightingController.SampleDirections;
+        var colours = lighting.SampleColours;
+
+        if (colours != null)
+        {
+            float peak = 0.0001f;
+            foreach (var c in colours)
+                peak = Mathf.Max(peak, c.r * 0.2126f + c.g * 0.7152f + c.b * 0.0722f);
+
+            for (int i = 0; i < directions.Length; i++)
+            {
+                if (!ProjectToDome(directions[i], cx, cy, radius, out Vector2 p)) continue;
+
+                var c = colours[i];
+                float luma = (c.r * 0.2126f + c.g * 0.7152f + c.b * 0.0722f) / peak;
+
+                GUI.color = new Color(c.r / peak, c.g / peak, c.b / peak,
+                                      Mathf.Clamp01(0.15f + luma * 0.85f));
+                float d = size * 0.045f;
+                GUI.DrawTexture(new Rect(p.x - d * 0.5f, p.y - d * 0.5f, d, d),
+                                Texture2D.whiteTexture);
+            }
+        }
+
+        // --- horizon rim ---
+        GUI.color = new Color(1f, 1f, 1f, 0.25f);
+        for (int i = 0; i < 48; i++)
+        {
+            float a = i / 48f * Mathf.PI * 2f;
+            GUI.DrawTexture(new Rect(cx + Mathf.Cos(a) * radius, cy + Mathf.Sin(a) * radius,
+                                     2f, 2f), Texture2D.whiteTexture);
+        }
+
+        // --- computed sun ---
+        Vector3 sunDirection = FromAzimuthElevation(lighting.SolarAzimuthDeg,
+                                                    lighting.SolarElevationDeg);
+        if (ProjectToDome(sunDirection, cx, cy, radius, out Vector2 sp))
+        {
+            GUI.color = new Color(1f, 0.85f, 0.2f, 0.95f);
+            float d = size * 0.09f;
+            GUI.DrawTexture(new Rect(sp.x - d * 0.5f, sp.y - d * 0.5f, d, d),
+                            Texture2D.whiteTexture);
+        }
+
+        // --- ARCore's estimate: negate travel direction to point back at the source ---
+        if (lighting.EstimatedLightTravel.HasValue &&
+            ProjectToDome(-lighting.EstimatedLightTravel.Value.normalized, cx, cy, radius,
+                          out Vector2 ep))
+        {
+            var c = lighting.EstimatedColour;
+            GUI.color = new Color(c.r, c.g, c.b, 0.95f);
+            float d = size * 0.06f;
+            GUI.DrawTexture(new Rect(ep.x - d * 0.5f, ep.y - d * 0.5f, d, d),
+                            Texture2D.whiteTexture);
+        }
+
+        GUI.color = prev;
+
+        string estimate = lighting.EstimatedLightTravel.HasValue
+            ? $"est {Azimuth(-lighting.EstimatedLightTravel.Value):F0}°/" +
+              $"{Elevation(-lighting.EstimatedLightTravel.Value):F0}°"
+            : "est: none";
+
+        GUI.Label(new Rect(x, y + size, size, btnH * 3f),
+                  $"sun {lighting.SolarAzimuthDeg:F0}°/{lighting.SolarElevationDeg:F0}°\n" +
+                  $"{estimate}  {lighting.EstimatedLumens:F0} lm\n" +
+                  $"lobes {lighting.AmbientLobeCount}, dir {lighting.AmbientDirectionality:F1}x",
+                  _label);
+    }
+
+    /// <summary>World direction to a point on the dome. Returns false for below the horizon.</summary>
+    static bool ProjectToDome(Vector3 direction, float cx, float cy, float radius, out Vector2 point)
+    {
+        point = default;
+        if (direction.y < 0f) return false;      // below the horizon, not on this chart
+
+        // Elevation drives distance from centre: straight up lands dead centre, the horizon
+        // lands on the rim. Unity is +Z north, +X east; screen up is north.
+        float r = (1f - direction.y) * radius;
+        Vector2 flat = new Vector2(direction.x, direction.z);
+
+        if (flat.sqrMagnitude > 1e-6f) flat.Normalize();
+
+        point = new Vector2(cx + flat.x * r, cy - flat.y * r);
+        return true;
+    }
+
+    static Vector3 FromAzimuthElevation(float azimuthDeg, float elevationDeg)
+    {
+        float a = azimuthDeg * Mathf.Deg2Rad, e = elevationDeg * Mathf.Deg2Rad;
+        return new Vector3(Mathf.Cos(e) * Mathf.Sin(a), Mathf.Sin(e), Mathf.Cos(e) * Mathf.Cos(a));
+    }
+
+    static float Azimuth(Vector3 d) => (Mathf.Atan2(d.x, d.z) * Mathf.Rad2Deg + 360f) % 360f;
+    static float Elevation(Vector3 d) => Mathf.Asin(Mathf.Clamp(d.normalized.y, -1f, 1f)) * Mathf.Rad2Deg;
+
+    void ArmTap(TapAction action)
+    {
+        _tapAction = action;
+        _armedOnFrame = Time.frameCount;
+        _tapResult = "";
     }
 }

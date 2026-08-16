@@ -44,6 +44,12 @@ public class BuildingLoader : MonoBehaviour
     /// <summary>What the sizing step actually did — the HUD reports it.</summary>
     public float AppliedScale { get; private set; } = 1f;
 
+    /// <summary>
+    /// Height in ALIGNMENT-ROOT metres — real building metres, independent of any preview
+    /// shrinking applied above it. Preview placement needs this to pick a size that fits.
+    /// </summary>
+    public float ModelHeightMetres { get; private set; }
+
     void Awake() => Instance = this;
 
     /// <summary>
@@ -116,7 +122,22 @@ public class BuildingLoader : MonoBehaviour
         AppliedScale = ResolveScale(parent, renderers);
         if (glbRoot != null) glbRoot.localScale = Vector3.one * AppliedScale;
 
-        if (renderers.Length > 0) BoundsSize = MeasureWorldBounds(renderers).size;
+        // Don't assume the importer got this right: a glTF material flagged transparent or
+        // double-sided can come in with casting off, and then the building silently throws
+        // no shadow at all. It is the one thing that sells the model as really being there.
+        foreach (var r in renderers)
+        {
+            r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+            r.receiveShadows = true;
+        }
+
+        if (renderers.Length > 0)
+        {
+            BoundsSize = MeasureWorldBounds(renderers).size;
+
+            float parentScaleY = Mathf.Abs(parent.lossyScale.y);
+            ModelHeightMetres = parentScaleY > 1e-6f ? BoundsSize.y / parentScaleY : BoundsSize.y;
+        }
 
         State = LoadState.Loaded;
         LastMessage = $"{RendererCount} renderers";
