@@ -23,7 +23,7 @@ public class DebugHud : MonoBehaviour
 
     bool _visible = true;
     float _height;
-    GUIStyle _label, _button, _box;
+    GUIStyle _label, _button, _box, _sliderTrack, _sliderThumb;
 
     /// <summary>What the next tap on the world will do. Armed by a button, fires once.</summary>
     enum TapAction { None, GhostStreetscape, PlacePreview }
@@ -98,7 +98,7 @@ public class DebugHud : MonoBehaviour
         else
         {
             bool placed = geospatial != null && geospatial.TryPlacePreviewAt(point.Value);
-            _tapResult = placed ? "placed" : "no floor under that tap";
+            _tapResult = geospatial != null ? geospatial.PlacementSource : "no controller";
 
             // Placement clears the nudge, so the slider must not keep showing an old offset.
             if (placed) _height = 0f;
@@ -156,6 +156,20 @@ public class DebugHud : MonoBehaviour
         _label.normal.textColor = Color.white;
 
         _button = new GUIStyle(GUI.skin.button) { fontSize = fontSize };
+
+        // IMGUI's stock slider thumb is about 10 px — fine with a mouse, hopeless with a
+        // thumb on a phone held at arm's length. Both track and knob are scaled to the
+        // screen so the knob is a real touch target.
+        _sliderTrack = new GUIStyle(GUI.skin.verticalSlider)
+        {
+            fixedWidth = Screen.width * 0.1f
+        };
+
+        _sliderThumb = new GUIStyle(GUI.skin.verticalSliderThumb)
+        {
+            fixedWidth = Screen.width * 0.1f,
+            fixedHeight = Screen.height * 0.045f
+        };
     }
 
     void OnGUI()
@@ -303,7 +317,8 @@ public class DebugHud : MonoBehaviour
                   $"height {_height:+0.00;-0.00}", _label);
 
         float newHeight = GUI.VerticalSlider(
-            new Rect(sliderX, sliderY, w * 0.1f, sliderH), _height, heightRange, -heightRange);
+            new Rect(sliderX, sliderY, w * 0.1f, sliderH), _height, heightRange, -heightRange,
+            _sliderTrack, _sliderThumb);
 
         if (!Mathf.Approximately(newHeight, _height))
         {
@@ -367,25 +382,13 @@ public class DebugHud : MonoBehaviour
             GUI.backgroundColor = sunBg;
         }
 
-        // Log scale: 10 m to 400 m. Most of the useful range is under 150 m, and a linear
-        // slider spends most of its travel out past where the model is a speck.
-        float sliderY = y + btnH * 1.4f;
-        float distance = Mathf.Clamp(geospatial.PreviewViewDistance, 10f, 400f);
-
-        GUI.Label(new Rect(pad, sliderY, w * 0.6f, btnH),
-                  $"as seen from {distance:F0} m", _label);
-
-        float t = Mathf.InverseLerp(Mathf.Log(10f), Mathf.Log(400f), Mathf.Log(distance));
-        float newT = GUI.HorizontalSlider(
-            new Rect(pad, sliderY + btnH * 0.9f, w * 0.62f, btnH), t, 0f, 1f);
-
-        if (!Mathf.Approximately(newT, t))
-            geospatial.PreviewViewDistance =
-                Mathf.Exp(Mathf.Lerp(Mathf.Log(10f), Mathf.Log(400f), newT));
+        // The viewing-distance slider is gone: placement auto-fits the model to the view, so
+        // the number was something to fight rather than something to set. The info panel
+        // still reports the distance it settled on.
 
         // --- stand it on the floor where you tap ---
         bool placing = _tapAction == TapAction.PlacePreview;
-        float placeY = sliderY + btnH * 2.4f;
+        float placeY = y + btnH * 1.4f;
 
         var placeBg = GUI.backgroundColor;
         if (placing) GUI.backgroundColor = Color.yellow;

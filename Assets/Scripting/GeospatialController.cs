@@ -89,6 +89,10 @@ public class GeospatialController : MonoBehaviour
              "are never standing inside it. 0 = never auto-size.")]
     [SerializeField] float previewFitFraction = 0.5f;
 
+    [Tooltip("Furthest a floor tap may place the model, in metres. Stops a near-horizontal " +
+             "tap from landing it through the wall on the far side of the room.")]
+    [SerializeField] float maxPlacementDistance = 8f;
+
     [Tooltip("Echo the status to the log once a second. A poor man's on-screen readout — " +
              "watch it with: adb logcat -s Unity:V")]
     [SerializeField] bool logStatus = true;
@@ -339,6 +343,13 @@ public class GeospatialController : MonoBehaviour
     /// </summary>
     void CreateShadowGround(Transform parent)
     {
+        // Resources first, because it is the only source that survives a player build with
+        // no inspector wiring: Shader.Find returns null on device for a shader nothing in a
+        // scene references, since the build strips it. Assets/Resources/ShadowCatcher.mat is
+        // always included, and it drags its shader in with it.
+        if (shadowCatcherMaterial == null)
+            shadowCatcherMaterial = Resources.Load<Material>("ShadowCatcher");
+
         if (shadowCatcherMaterial == null)
         {
             var shader = Shader.Find("AR/ShadowCatcher");
@@ -376,6 +387,13 @@ public class GeospatialController : MonoBehaviour
 
     /// <summary>Is the scale-model preview showing instead of the real placement?</summary>
     public bool PreviewActive => _previewRoot != null;
+
+    /// <summary>
+    /// How the last floor tap resolved: a real ARCore plane, the assumed-floor fallback, or
+    /// why it refused. Shown in the HUD, because "a plane" and "a guess 1.6 m down" behave
+    /// very differently and you cannot tell them apart from the result.
+    /// </summary>
+    public string PlacementSource { get; private set; } = "";
 
     /// <summary>
     /// The distance the preview is pretending you stand at. Driving this from a slider is
@@ -550,10 +568,31 @@ public class GeospatialController : MonoBehaviour
         if (cam == null) return false;
 
         var ray = cam.ScreenPointToRay(screenPosition);
+        Vector3 point;
 
-        if (!TryRaycastPlanes(ray, out Vector3 point) &&
-            !TryRaycastAssumedFloor(cam, ray, out point))
+        if (TryRaycastPlanes(ray, out point))
+        {
+            PlacementSource = "plane";
+        }
+        else if (TryRaycastAssumedFloor(cam, ray, out point))
+        {
+            // A ray aimed just below the horizon travels a very long way before it meets a
+            // plane 1.6 m down — straight through the wall in front of you, which is how the
+            // model ended up embedded in one. Refuse rather than place somewhere absurd.
+            float distance = Vector3.Distance(cam.transform.position, point);
+            if (distance > maxPlacementDistance)
+            {
+                PlacementSource = $"missed — aim closer to your feet ({distance:F0} m)";
+                return false;
+            }
+
+            PlacementSource = "assumed floor";
+        }
+        else
+        {
+            PlacementSource = "no floor — aim below the horizon";
             return false;
+        }
 
         _previewOnFloor = true;
         _previewFloorPoint = point;
@@ -566,8 +605,17 @@ public class GeospatialController : MonoBehaviour
 
         FitPreviewToView();
 
+        // Must be STRICTLY horizontal or the building tips over. Tapping near your own feet
+        // collapses this to nothing, and the old fallback used the camera's forward — which,
+        // while you are aiming down at the floor, points up and backwards, laying the model
+        // on its side. Every fallback here is projected flat.
         Vector3 toCamera = Vector3.ProjectOnPlane(cam.transform.position - point, Vector3.up);
-        if (toCamera.sqrMagnitude < 1e-4f) toCamera = -cam.transform.forward;
+
+        if (toCamera.sqrMagnitude < 1e-3f)
+            toCamera = Vector3.ProjectOnPlane(-cam.transform.forward, Vector3.up);
+
+        if (toCamera.sqrMagnitude < 1e-3f)
+            toCamera = Vector3.forward;
 
         _previewRoot.localScale = Vector3.one * PreviewScale;
         _previewRoot.SetPositionAndRotation(

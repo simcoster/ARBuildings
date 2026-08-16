@@ -106,12 +106,18 @@ public class BuildingLoader : MonoBehaviour
         // Models often come in with wrong scale/origin. Normalise here so the alignment
         // hierarchy above is the only thing deciding where the building sits.
         Transform glbRoot = null;
+        Vector3 importedScale = Vector3.one;
+
         if (parent.childCount > 0)
         {
             glbRoot = parent.GetChild(0);
+
+            // Origin only. The ROTATION is deliberately left alone: exporters bake the
+            // Z-up -> Y-up conversion into the root node — Blender writes a +90 degree X
+            // rotation — and clearing it lays the building on its back. The old placeholder
+            // GLB happened to have no rotation there, which is why resetting it looked safe.
             glbRoot.localPosition = Vector3.zero;
-            glbRoot.localRotation = Quaternion.identity;
-            glbRoot.localScale = Vector3.one;
+            importedScale = glbRoot.localScale;
         }
 
         // Zero renderers means the GLB parsed but produced nothing visible — a very
@@ -119,8 +125,10 @@ public class BuildingLoader : MonoBehaviour
         var renderers = parent.GetComponentsInChildren<Renderer>();
         RendererCount = renderers.Length;
 
+        // Measured before we touch the scale, so this multiplies whatever the asset came
+        // with rather than throwing an authored scale away.
         AppliedScale = ResolveScale(parent, renderers);
-        if (glbRoot != null) glbRoot.localScale = Vector3.one * AppliedScale;
+        if (glbRoot != null) glbRoot.localScale = importedScale * AppliedScale;
 
         // Don't assume the importer got this right: a glTF material flagged transparent or
         // double-sided can come in with casting off, and then the building silently throws
