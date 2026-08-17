@@ -282,6 +282,15 @@ public class GeospatialController : MonoBehaviour
             lng = footLng;
         }
 
+        // A saved on-site alignment outranks both: those coordinates were measured by
+        // standing there and lining the building up, which beats anything typed in.
+        if (nudge != null && nudge.TryGetSavedCoordinates(siteId, out double savedLat, out double savedLng))
+        {
+            lat = savedLat;
+            lng = savedLng;
+            Debug.Log($"[Geospatial] using saved coordinates {lat:F7}, {lng:F7} for '{siteId}'");
+        }
+
         var promise = anchorManager.ResolveAnchorOnTerrainAsync(
             lat, lng, altitudeAboveTerrain, rotation);
 
@@ -322,9 +331,9 @@ public class GeospatialController : MonoBehaviour
         // Rotation 2: correcting the GLB's own local axes.
         var alignmentRoot = placement.CreateAlignmentRoot(nudgeRoot);
 
-        // Preview nudges are scratch work at 1/50 scale — keep them out of the real site's
-        // saved offsets, which are surveyed values you bake into buildings.json.
-        if (nudge != null) nudge.Bind(nudgeRoot, _previewRoot != null ? siteId + "-preview" : siteId);
+        // One site id for both modes: the adjustments you dial in during preview are the
+        // same ones that must apply on site, which is the entire point of saving them.
+        if (nudge != null) nudge.Bind(nudgeRoot, siteId);
 
         // Outdoors the streetscape meshes receive the model's shadow. In preview there is no
         // ground at all, so one gets made — otherwise the model appears to cast nothing.
@@ -381,6 +390,47 @@ public class GeospatialController : MonoBehaviour
         renderer.sharedMaterial = shadowCatcherMaterial;
         renderer.shadowCastingMode = ShadowCastingMode.Off;   // a receiver, never a caster
         renderer.receiveShadows = true;
+    }
+
+    /// <summary>
+    /// Saves the adjustment, and on site also rewrites the site's coordinates to wherever
+    /// the building has actually been dragged to.
+    ///
+    /// This only works with a live Earth fix. In preview there is no such thing as a
+    /// coordinate — the model is sitting on your floor in the AR session's own frame, which
+    /// has no relationship to anywhere on Earth — so preview saves the relative values only.
+    /// </summary>
+    public void SaveAdjustment()
+    {
+        if (nudge == null) return;
+
+        if (TryCaptureCoordinates(out double lat, out double lng))
+        {
+            nudge.BakeCoordinates(lat, lng);
+            Debug.Log($"[Geospatial] baked new coordinates {lat:F7}, {lng:F7} for '{siteId}'");
+        }
+
+        nudge.Save();
+    }
+
+    /// <summary>Where the model's own origin sits on Earth right now, if that is knowable.</summary>
+    bool TryCaptureCoordinates(out double latitude, out double longitude)
+    {
+        latitude = 0;
+        longitude = 0;
+
+        // Preview placements are session-local; converting one would invent a coordinate.
+        if (_previewRoot != null || _hierarchyRoot == null) return false;
+        if (earthManager == null || earthManager.EarthTrackingState != TrackingState.Tracking)
+            return false;
+
+        var root = _hierarchyRoot.transform;
+        var pose = new Pose(root.position, root.rotation);
+        var geospatial = earthManager.Convert(pose);
+
+        latitude = geospatial.Latitude;
+        longitude = geospatial.Longitude;
+        return true;
     }
 
     // ------------------------------------------------------------------ preview
@@ -598,11 +648,8 @@ public class GeospatialController : MonoBehaviour
         _previewFloorPoint = point;
         _previewRefDistance = Vector3.Distance(cam.transform.position, point);
 
-        // A saved pan/height offset from an earlier session rides on NudgeRoot and can put
-        // the model under the floor or off to one side, which looks exactly like a failed
-        // placement. An explicit "put it there" should mean exactly that.
-        if (nudge != null) nudge.ResetNudge();
-
+        // Adjustments are NOT cleared here any more: they are now deliberate, saved values
+        // that must survive a re-placement. Use the reset button if one buries the model.
         FitPreviewToView();
 
         // Must be STRICTLY horizontal or the building tips over. Tapping near your own feet

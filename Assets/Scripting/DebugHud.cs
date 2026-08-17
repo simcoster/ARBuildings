@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.InputSystem.EnhancedTouch;
@@ -18,11 +19,7 @@ public class DebugHud : MonoBehaviour
     [SerializeField] BuildingLoader loader;
     [SerializeField] StreetscapeShadowSetup streetscape;
 
-    [Tooltip("Metres of height adjustment either side of the anchor.")]
-    [SerializeField] float heightRange = 5f;
-
     bool _visible = true;
-    float _height;
     GUIStyle _label, _button, _box, _sliderTrack, _sliderThumb;
 
     /// <summary>What the next tap on the world will do. Armed by a button, fires once.</summary>
@@ -99,9 +96,6 @@ public class DebugHud : MonoBehaviour
         {
             bool placed = geospatial != null && geospatial.TryPlacePreviewAt(point.Value);
             _tapResult = geospatial != null ? geospatial.PlacementSource : "no controller";
-
-            // Placement clears the nudge, so the slider must not keep showing an old offset.
-            if (placed) _height = 0f;
         }
     }
 
@@ -160,14 +154,14 @@ public class DebugHud : MonoBehaviour
         // IMGUI's stock slider thumb is about 10 px — fine with a mouse, hopeless with a
         // thumb on a phone held at arm's length. Both track and knob are scaled to the
         // screen so the knob is a real touch target.
-        _sliderTrack = new GUIStyle(GUI.skin.verticalSlider)
+        _sliderTrack = new GUIStyle(GUI.skin.horizontalSlider)
         {
-            fixedWidth = Screen.width * 0.1f
+            fixedHeight = Screen.height * 0.03f
         };
 
-        _sliderThumb = new GUIStyle(GUI.skin.verticalSliderThumb)
+        _sliderThumb = new GUIStyle(GUI.skin.horizontalSliderThumb)
         {
-            fixedWidth = Screen.width * 0.1f,
+            fixedWidth = Screen.width * 0.11f,
             fixedHeight = Screen.height * 0.045f
         };
     }
@@ -230,7 +224,7 @@ public class DebugHud : MonoBehaviour
         if (geospatial != null && geospatial.PreviewActive)
             text += geospatial.PreviewReadout + "\n\n";
 
-        if (nudge != null) text += $"edit: {nudge.CurrentMode}\n" + nudge.DebugReadout + "\n\n";
+        if (nudge != null) text += nudge.DebugReadout + "\n\n";
         if (lighting != null) text += lighting.DebugReadout;
 
         float boxW = w * 0.7f;
@@ -288,51 +282,89 @@ public class DebugHud : MonoBehaviour
 
         if (nudge == null) return;
 
-        // --- edit mode: off by default so stray grip touches can't move the building ---
-        float modeY = Screen.height - pad - btnH * 2.3f;
-        float modeW = w * 0.3f;
+        DrawAdjustControls(w, pad, btnH);
+    }
 
-        var modes = new[] { AlignmentNudge.Mode.Off, AlignmentNudge.Mode.Pan, AlignmentNudge.Mode.Rotate };
-        for (int i = 0; i < modes.Length; i++)
+    /// <summary>
+    /// One slider drives whichever of the five values is selected. Applies in preview and in
+    /// real geospatial placement alike, and "save" writes them to disk for the next run.
+    /// </summary>
+    void DrawAdjustControls(float w, float pad, float btnH)
+    {
+        var parameters = (AlignmentNudge.Param[])Enum.GetValues(typeof(AlignmentNudge.Param));
+
+        float rowY = Screen.height - pad - btnH * 4.6f;
+        float cellW = (w - pad * 2f - pad * 0.4f * (parameters.Length - 1)) / parameters.Length;
+
+        // --- which value the slider edits ---
+        for (int i = 0; i < parameters.Length; i++)
         {
-            bool active = nudge.CurrentMode == modes[i];
+            bool active = nudge.Selected == parameters[i];
             var prevBg = GUI.backgroundColor;
             if (active) GUI.backgroundColor = Color.cyan;
 
-            if (GUI.Button(new Rect(pad + i * (modeW + pad * 0.4f), modeY, modeW, btnH),
-                           modes[i].ToString().ToLower(), _button))
-                nudge.CurrentMode = modes[i];
+            if (GUI.Button(new Rect(pad + i * (cellW + pad * 0.4f), rowY, cellW, btnH),
+                           AlignmentNudge.Label(parameters[i]), _button))
+                nudge.Selected = parameters[i];
 
             GUI.backgroundColor = prevBg;
         }
 
-        // --- height slider: vertical, right edge, thumb-reachable ---
-        // Starts below the whole right-hand button stack. IMGUI gives earlier controls the
-        // event first, so any overlap would leave the slider dead where a button covers it.
-        float sliderX = w - pad - w * 0.1f;
-        float sliderY = pad + btnH * 6f;
-        float sliderH = Screen.height * 0.34f;
+        // --- the slider ---
+        var selected = nudge.Selected;
+        AlignmentNudge.RangeOf(selected, out float min, out float max, out bool logarithmic);
 
-        GUI.Label(new Rect(sliderX - w * 0.02f, sliderY - btnH, w * 0.2f, btnH),
-                  $"height {_height:+0.00;-0.00}", _label);
+        float value = nudge.GetValue(selected);
+        float sliderY = rowY + btnH * 1.5f;
 
-        float newHeight = GUI.VerticalSlider(
-            new Rect(sliderX, sliderY, w * 0.1f, sliderH), _height, heightRange, -heightRange,
-            _sliderTrack, _sliderThumb);
+        GUI.Label(new Rect(pad, sliderY - btnH * 0.9f, w * 0.6f, btnH),
+                  $"{AlignmentNudge.Label(selected)}: {nudge.ValueText(selected)}", _label);
 
-        if (!Mathf.Approximately(newHeight, _height))
+        float t = logarithmic
+            ? Mathf.InverseLerp(Mathf.Log(min), Mathf.Log(max), Mathf.Log(Mathf.Max(min, value)))
+            : Mathf.InverseLerp(min, max, value);
+
+        float newT = GUI.HorizontalSlider(new Rect(pad, sliderY, w - pad * 2f, btnH), t, 0f, 1f,
+                                          _sliderTrack, _sliderThumb);
+
+        if (!Mathf.Approximately(newT, t))
+            nudge.SetValue(selected, logarithmic
+                ? Mathf.Exp(Mathf.Lerp(Mathf.Log(min), Mathf.Log(max), newT))
+                : Mathf.Lerp(min, max, newT));
+
+        // --- save / reset / clear ---
+        float actionY = Screen.height - pad - btnH;
+        float gap = pad * 0.4f;
+        float actionW = (w - pad * 2f - gap * 2f) / 3f;
+
+        // The outcome line sits above the row: it is the only way to tell a coordinate-
+        // rewriting save from an offsets-only one.
+        if (nudge.LastSaveMessage != "")
+            GUI.Label(new Rect(pad, actionY - btnH * 0.95f, w - pad * 2f, btnH),
+                      nudge.LastSaveMessage, _label);
+
+        var saveBg = GUI.backgroundColor;
+        if (nudge.Dirty) GUI.backgroundColor = Color.yellow;
+
+        // Routed through the controller, not straight to the nudge: on site the save also
+        // captures the building's real coordinates, and only the controller can convert them.
+        if (GUI.Button(new Rect(pad, actionY, actionW, btnH),
+                       nudge.Dirty ? "save *" : "save", _button))
         {
-            _height = newHeight;
-            nudge.SetHeight(_height);
+            if (geospatial != null) geospatial.SaveAdjustment();
+            else nudge.Save();
         }
 
-        // --- reset ---
-        if (GUI.Button(new Rect(pad, Screen.height - pad - btnH, w * 0.3f, btnH),
-                       "reset nudge", _button))
-        {
-            _height = 0f;
-            nudge.ResetNudge();
-        }
+        GUI.backgroundColor = saveBg;
+
+        // Zeroes the sliders only — nothing on disk changes until you save.
+        if (GUI.Button(new Rect(pad + actionW + gap, actionY, actionW, btnH), "reset", _button))
+            nudge.ResetAll();
+
+        // Deletes the saved entry, restoring the project's own coordinates.
+        if (GUI.Button(new Rect(pad + (actionW + gap) * 2f, actionY, actionW, btnH),
+                       "clear saved", _button))
+            nudge.ClearSaved();
     }
 
     /// <summary>
