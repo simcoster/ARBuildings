@@ -11,6 +11,7 @@ Shader "AR/ShadowCatcher"
         {
             Blend SrcAlpha OneMinusSrcAlpha
             ZWrite Off
+            Cull Off        // a ground plane seen from the wrong side must still catch
 
             HLSLPROGRAM
             #pragma vertex vert

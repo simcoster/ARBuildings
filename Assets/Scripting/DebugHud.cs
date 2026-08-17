@@ -337,19 +337,33 @@ public class DebugHud : MonoBehaviour
         float gap = pad * 0.4f;
         float actionW = (w - pad * 2f - gap * 2f) / 3f;
 
-        // The outcome line sits above the row: it is the only way to tell a coordinate-
-        // rewriting save from an offsets-only one.
-        if (nudge.LastSaveMessage != "")
-            GUI.Label(new Rect(pad, actionY - btnH * 0.95f, w - pad * 2f, btnH),
-                      nudge.LastSaveMessage, _label);
+        // Saving is only allowed with a good enough fix, so the state of the fix is shown
+        // BEFORE the button is pressed — being told why afterwards is no help on site.
+        bool canSave = true;
+        string saveReason = "";
+        if (geospatial != null) canSave = geospatial.CanSaveCoordinates(out saveReason);
+
+        // Saving is never blocked — scale, rotation and offsets are worth keeping with or
+        // without a fix. What the line above the button says is what you are about to get.
+        string status = nudge.LastSaveMessage != ""
+            ? nudge.LastSaveMessage
+            : (canSave ? saveReason : $"{saveReason} — will save settings only");
+
+        if (status != "")
+        {
+            var prevColour = GUI.color;
+            GUI.color = canSave ? Color.white : new Color(1f, 0.75f, 0.3f);
+            GUI.Label(new Rect(pad, actionY - btnH * 0.95f, w - pad * 2f, btnH), status, _label);
+            GUI.color = prevColour;
+        }
 
         var saveBg = GUI.backgroundColor;
         if (nudge.Dirty) GUI.backgroundColor = Color.yellow;
 
-        // Routed through the controller, not straight to the nudge: on site the save also
-        // captures the building's real coordinates, and only the controller can convert them.
+        // Routed through the controller, not straight to the nudge: the save also captures
+        // the building's real coordinates, and only the controller can convert them.
         if (GUI.Button(new Rect(pad, actionY, actionW, btnH),
-                       nudge.Dirty ? "save *" : "save", _button))
+                       canSave ? "save + GPS" : "save", _button))
         {
             if (geospatial != null) geospatial.SaveAdjustment();
             else nudge.Save();
@@ -523,10 +537,13 @@ public class DebugHud : MonoBehaviour
               $"{Elevation(-lighting.EstimatedLightTravel.Value):F0}°"
             : "est: none";
 
-        GUI.Label(new Rect(x, y + size, size, btnH * 3f),
+        GUI.Label(new Rect(x, y + size, size, btnH * 4f),
                   $"sun {lighting.SolarAzimuthDeg:F0}°/{lighting.SolarElevationDeg:F0}°\n" +
                   $"{estimate}  {lighting.EstimatedLumens:F0} lm\n" +
-                  $"lobes {lighting.AmbientLobeCount}, dir {lighting.AmbientDirectionality:F1}x",
+                  $"lobes {lighting.AmbientLobeCount}, dir {lighting.AmbientDirectionality:F1}x\n" +
+                  (lighting.NorthKnown
+                      ? $"north {lighting.NorthOffsetDeg:F0}° (from VPS)"
+                      : $"north {lighting.NorthOffsetDeg:F0}° GUESSED"),
                   _label);
     }
 

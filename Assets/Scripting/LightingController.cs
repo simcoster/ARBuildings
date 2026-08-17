@@ -1,3 +1,4 @@
+using Google.XR.ARCoreExtensions;
 using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -31,6 +32,15 @@ public class LightingController : MonoBehaviour
     [SerializeField] float forcedSunElevation = 45f;
     [SerializeField] float forcedSunAzimuth = 135f;
     [SerializeField] float forcedSunIntensity = 1.4f;
+
+    [Header("North alignment")]
+    [Tooltip("Optional. Found automatically. Needed to know which way Unity's +Z actually " +
+             "points, without which the sun — and every shadow — is aimed arbitrarily.")]
+    [SerializeField] AREarthManager earthManager;
+
+    [Tooltip("Used only until ARCore knows where north is: indoors, in preview, or before " +
+             "VPS localizes. Spin it until the shadows match the room you're standing in.")]
+    [SerializeField] float fallbackNorthOffsetDeg = 0f;
 
     [Header("Exposure matching")]
     [SerializeField] bool driveExposure = true;
@@ -141,6 +151,39 @@ public class LightingController : MonoBehaviour
             _ambientTimer = 0f;
             AnalyseAmbient();
         }
+    }
+
+    /// <summary>
+    /// Degrees to add to a true bearing to get the equivalent Unity yaw. Zero would mean
+    /// Unity's +Z happens to point at true north, which it only does by coincidence.
+    /// </summary>
+    public float NorthOffsetDeg { get; private set; }
+
+    /// <summary>True once ARCore has told us where north is; false indoors and in preview.</summary>
+    public bool NorthKnown { get; private set; }
+
+    /// <summary>
+    /// Derives Unity's heading error from the camera: ARCore reports the camera's true
+    /// bearing, and Unity knows its yaw, so the difference is the rotation between frames.
+    /// </summary>
+    void UpdateNorthAlignment()
+    {
+        if (earthManager == null) earthManager = FindAnyObjectByType<AREarthManager>();
+
+        if (earthManager == null ||
+            earthManager.EarthTrackingState != TrackingState.Tracking)
+        {
+            if (!NorthKnown) NorthOffsetDeg = fallbackNorthOffsetDeg;
+            return;   // a previously measured offset is better than falling back to a guess
+        }
+
+        var camera = Camera.main;
+        if (camera == null) return;
+
+        var pose = earthManager.CameraGeospatialPose;
+
+        NorthOffsetDeg = Mathf.DeltaAngle(0f, camera.transform.eulerAngles.y - (float)pose.Heading);
+        NorthKnown = true;
     }
 
     // ------------------------------------------------------- ambient probe analysis
@@ -275,15 +318,22 @@ public class LightingController : MonoBehaviour
         }
         sunLight.enabled = true;
 
-        float azRad = az * Mathf.Deg2Rad;
+        // Azimuth is a TRUE bearing; the light lives in Unity's world, and the two are not
+        // the same frame. Unity's origin and heading are wherever the AR session happened to
+        // start — that is exactly why AREarthManager.Convert() exists. Rotate the bearing
+        // into Unity's frame before using it, or the sun (and every cast shadow) points in a
+        // direction that changes with whichever way the phone was facing at launch.
+        UpdateNorthAlignment();
+
+        float yawRad = (az + NorthOffsetDeg) * Mathf.Deg2Rad;
         float elRad = el * Mathf.Deg2Rad;
 
-        // ARCore geospatial world frame is EUS: +X East, +Y Up, +Z South => North is -Z.
+        // Unity yaw: 0 faces +Z and increases clockwise, so a bearing is (sin, cos) in XZ.
         // This is the direction TOWARD the sun.
         Vector3 toSun = new Vector3(
-            Mathf.Cos(elRad) * Mathf.Sin(azRad),
+            Mathf.Cos(elRad) * Mathf.Sin(yawRad),
             Mathf.Sin(elRad),
-           -Mathf.Cos(elRad) * Mathf.Cos(azRad));
+            Mathf.Cos(elRad) * Mathf.Cos(yawRad));
 
         sunLight.transform.rotation = Quaternion.LookRotation(-toSun);
     }

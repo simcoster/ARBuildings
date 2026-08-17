@@ -213,7 +213,13 @@ public class GeospatialController : MonoBehaviour
             PositionPreview();
         }
 
-        if (_placed) return;
+        if (_placed)
+        {
+            // Preview skips localization, but it must not go blind to it: whether a fix has
+            // arrived is exactly what decides if a save can record real coordinates.
+            if (_previewRoot != null) RefreshPreviewEarthStatus();
+            return;
+        }
 
         // EarthState is the diagnostic that matters: it separates "API key rejected" and
         // "Geospatial disabled" from "still warming up". EarthTrackingState collapses them
@@ -254,6 +260,39 @@ public class GeospatialController : MonoBehaviour
         _placed = true;
         CurrentPhase = Phase.ResolvingAnchor;
         PlaceBuilding();
+    }
+
+    /// <summary>
+    /// Keeps the Earth readout live while preview is up. Device GPS and a VPS fix are very
+    /// different things — the phone can know its coordinates to within a few metres while
+    /// ARCore still has no idea where the camera is, and only the latter is good enough to
+    /// place a building — so both are reported.
+    /// </summary>
+    void RefreshPreviewEarthStatus()
+    {
+        if (earthManager == null) return;
+
+        var earthState = earthManager.EarthState;
+        var tracking = earthManager.EarthTrackingState;
+
+        string line;
+        if (earthState != EarthState.Enabled)
+        {
+            line = $"Earth: {earthState}";
+        }
+        else if (tracking != TrackingState.Tracking)
+        {
+            line = $"VPS: {tracking} — no fix yet\nlocation service: {_locationStatus}";
+        }
+        else
+        {
+            var pose = earthManager.CameraGeospatialPose;
+            line = $"VPS: Tracking  {pose.Latitude:F6}, {pose.Longitude:F6}\n" +
+                   $"±{pose.HorizontalAccuracy:F1} m (need ≤{maxHorizontalAccuracy}), " +
+                   $"yaw ±{pose.OrientationYawAccuracy:F0}°";
+        }
+
+        DebugReadout = "preview: placed by hand, not by VPS\n" + line;
     }
 
     void LateUpdate()
@@ -380,7 +419,9 @@ public class GeospatialController : MonoBehaviour
         Destroy(ground.GetComponent<Collider>());
 
         ground.transform.SetParent(parent, false);
-        ground.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);   // quad faces +Z, we need +Y
+        // MINUS 90, not plus: a Quad's normal is +Z, and rotating +90 about X sends it to
+        // -Y — face down, back-face culled, invisible from above. -90 sends it to +Y.
+        ground.transform.localRotation = Quaternion.Euler(-90f, 0f, 0f);
 
         // In alignment-root space one unit is one metre, so this is metres of real building.
         float span = Mathf.Max(1f, shadowGroundScale * 30f);
@@ -404,13 +445,78 @@ public class GeospatialController : MonoBehaviour
     {
         if (nudge == null) return;
 
+        // Always saves. With a fix it also records where the building is; without one it
+        // stores scale, rotation and offsets, which are just as real without a coordinate.
+        // The HUD says which happened — the failure to avoid is a silent one, not a partial.
         if (TryCaptureCoordinates(out double lat, out double lng))
         {
             nudge.BakeCoordinates(lat, lng);
             Debug.Log($"[Geospatial] baked new coordinates {lat:F7}, {lng:F7} for '{siteId}'");
         }
+        else
+        {
+            CanSaveCoordinates(out string reason);
+            Debug.Log($"[Geospatial] saving without coordinates — {reason}");
+        }
 
         nudge.Save();
+    }
+
+    /// <summary>
+    /// Whether a save can record real coordinates, and if not, what to do about it.
+    ///
+    /// The accuracy gate is the important part. ARCore will happily hand back a lat/lng
+    /// while its own horizontal accuracy is tens of metres — your last outdoor reading was
+    /// ±46 m — and baking that would overwrite a surveyed coordinate with a worse guess.
+    /// </summary>
+    public bool CanSaveCoordinates(out string reason)
+    {
+        // Preview is NOT excluded. It only skips *waiting* for localization; it does not
+        // switch Earth off. Outdoors with preview on, ARCore often has a perfectly good fix,
+        // and a model stood on the pavement then has a real coordinate worth recording.
+        if (_hierarchyRoot == null)
+        {
+            reason = "nothing placed yet";
+            return false;
+        }
+
+        if (earthManager == null)
+        {
+            reason = "no earth manager";
+            return false;
+        }
+
+        var state = earthManager.EarthState;
+        if (state != EarthState.Enabled)
+        {
+            reason = $"Earth: {state}";
+            return false;
+        }
+
+        if (earthManager.EarthTrackingState != TrackingState.Tracking)
+        {
+            reason = "no VPS fix — point at facades and walk sideways";
+            return false;
+        }
+
+        var pose = earthManager.CameraGeospatialPose;
+
+        if (pose.HorizontalAccuracy > maxHorizontalAccuracy)
+        {
+            reason = $"GPS too rough: ±{pose.HorizontalAccuracy:F1} m " +
+                     $"(need ≤{maxHorizontalAccuracy} m)";
+            return false;
+        }
+
+        if (pose.OrientationYawAccuracy > maxYawAccuracy)
+        {
+            reason = $"heading too rough: ±{pose.OrientationYawAccuracy:F1}° " +
+                     $"(need ≤{maxYawAccuracy}°)";
+            return false;
+        }
+
+        reason = $"GPS ±{pose.HorizontalAccuracy:F1} m — ready";
+        return true;
     }
 
     /// <summary>Where the model's own origin sits on Earth right now, if that is knowable.</summary>
@@ -419,10 +525,7 @@ public class GeospatialController : MonoBehaviour
         latitude = 0;
         longitude = 0;
 
-        // Preview placements are session-local; converting one would invent a coordinate.
-        if (_previewRoot != null || _hierarchyRoot == null) return false;
-        if (earthManager == null || earthManager.EarthTrackingState != TrackingState.Tracking)
-            return false;
+        if (!CanSaveCoordinates(out _)) return false;
 
         var root = _hierarchyRoot.transform;
         var pose = new Pose(root.position, root.rotation);
@@ -496,7 +599,7 @@ public class GeospatialController : MonoBehaviour
 
         _placed = true;
         CurrentPhase = Phase.Placed;
-        DebugReadout = "preview mode — localization skipped";
+        DebugReadout = "preview: placed by hand, not by VPS";
     }
 
     void ExitPreview()
