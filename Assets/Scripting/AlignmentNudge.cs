@@ -73,6 +73,18 @@ public class AlignmentNudge : MonoBehaviour
         $"E {Current.eastMetres:+0.0;-0.0}  N {Current.northMetres:+0.0;-0.0}  " +
         $"up {Current.heightMetres:+0.0;-0.0} m{(Dirty ? "  *unsaved*" : "")}";
 
+    /// <summary>Adjustment state for the capture button, including what is on disk.</summary>
+    public string StateReport =>
+        $"adjust site        : {_siteId}\n" +
+        $"adjust rot         : {Current.headingDeg:F2} deg\n" +
+        $"adjust scale       : {Current.scale:F3}x\n" +
+        $"adjust E / N / up  : {Current.eastMetres:F2} / {Current.northMetres:F2} / " +
+        $"{Current.heightMetres:F2} m\n" +
+        $"baked coordinates  : {(Current.hasCoordinates ? $"{Current.latitude:F7}, {Current.longitude:F7}" : "none")}\n" +
+        $"unsaved changes    : {Dirty}\n" +
+        $"last save message  : {LastSaveMessage}\n" +
+        $"adjustments file   : {FilePath}\n";
+
     // ------------------------------------------------------------------ binding
 
     /// <summary>

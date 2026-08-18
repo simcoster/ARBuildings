@@ -45,26 +45,119 @@ public class StreetscapeShadowSetup : MonoBehaviour
     readonly Dictionary<TrackableId, MeshRenderer> _renderers = new();
     Transform _container;
 
-    /// <summary>How the ghosted mesh is chosen.</summary>
-    public enum GhostSelection
-    {
-        /// <summary>Whichever building mesh's bounds contain the anchor. Guesses.</summary>
-        AutoFromAnchor,
-
-        /// <summary>Whichever mesh you tapped. Doesn't guess.</summary>
-        Manual,
-    }
-
-    public GhostSelection SelectionMode { get; private set; } = GhostSelection.AutoFromAnchor;
-    TrackableId _selectedId;
-
     /// <summary>Streetscape meshes currently streamed. 0 outdoors means none arrived.</summary>
     public int MeshCount => _renderers.Count;
 
     /// <summary>How many got the ghost material — &gt;1 means merged meshes over-selected.</summary>
     public int GhostedCount { get; private set; }
 
-    // --------------------------------------------------------------- lifecycle
+    // ------------------------------------------------------------------ cutout
+
+    static readonly int CutoutMatrixId = Shader.PropertyToID("_OccluderCutoutWorldToLocal");
+    static readonly int CutoutOnId = Shader.PropertyToID("_OccluderCutoutOn");
+
+    [Header("Occluder cutout")]
+    [Tooltip("Stop the real world occluding inside the volume the replacement building " +
+             "occupies. Cuts by VOLUME rather than by whole mesh, so it works even where " +
+             "ARCore serves no Building geometry at all and there is nothing to ghost.")]
+    [SerializeField] bool cutoutEnabled = true;
+
+    [Tooltip("Multiplier on the model's own box. A little over 1 covers the gap between a " +
+             "coarse streetscape mesh and the model's true surface.")]
+    [SerializeField] float cutoutMargin = 1.08f;
+
+    [Tooltip("Extra metres added on every side, mostly to clear the terrain right at the base.")]
+    [SerializeField] float cutoutPaddingMetres = 1.5f;
+
+    /// <summary>Human-readable cutout state for the capture report.</summary>
+    public string CutoutReadout { get; private set; } = "off";
+
+    /// <summary>
+    /// Rebuilt every frame rather than cached: the anchor moves whenever ARCore re-localizes,
+    /// and a cutout left behind at the old pose would carve a hole in the wrong place.
+    /// </summary>
+    void LateUpdate()
+    {
+        var loader = BuildingLoader.Instance;
+
+        bool usable = cutoutEnabled &&
+                      loader != null &&
+                      loader.State == BuildingLoader.LoadState.Loaded &&
+                      loader.LoadedParent != null &&
+                      loader.LocalBounds.size.sqrMagnitude > 0.001f;
+
+        if (!usable)
+        {
+            Shader.SetGlobalFloat(CutoutOnId, 0f);
+            CutoutReadout = cutoutEnabled ? "waiting for model" : "disabled";
+            return;
+        }
+
+        var bounds = loader.LocalBounds;
+
+        // Padding goes sideways and up, never DOWN past the base. Extending it below ground
+        // would stop the terrain receiving shadow in a skirt around the building, and the
+        // model's own shadow would appear detached from it by exactly that margin.
+        Vector3 size = bounds.size * cutoutMargin + Vector3.one * (cutoutPaddingMetres * 2f);
+        size.y -= cutoutPaddingMetres;
+
+        Vector3 centre = bounds.center;
+        centre.y += cutoutPaddingMetres * 0.5f;
+
+        // TRS maps the unit cube onto the box; the parent's matrix carries it into the world
+        // complete with the building's heading, so the box is oriented, not axis-aligned.
+        Matrix4x4 boxToWorld = loader.LoadedParent.localToWorldMatrix *
+                               Matrix4x4.TRS(centre, Quaternion.identity, size);
+
+        Shader.SetGlobalMatrix(CutoutMatrixId, boxToWorld.inverse);
+        Shader.SetGlobalFloat(CutoutOnId, 1f);
+
+        CutoutReadout = $"on, {size.x:F1} x {size.y:F1} x {size.z:F1} m";
+    }
+
+    /// <summary>
+    /// Counts meshes by type. The decisive question when ghosting finds nothing is whether
+    /// ARCore is serving any Building geometry here at all — coverage is not universal, and
+    /// a site with terrain only can never have its building ghosted or picked.
+    /// </summary>
+    public string GeometryTypeBreakdown
+    {
+        get
+        {
+            if (streetscapeManager == null) return "no manager";
+
+            int building = 0, terrain = 0, other = 0, missing = 0;
+
+            foreach (var id in _renderers.Keys)
+            {
+                var geometry = streetscapeManager.GetStreetscapeGeometry(id);
+                if (geometry == null) { missing++; continue; }
+
+                switch (geometry.streetscapeGeometryType)
+                {
+                    case StreetscapeGeometryType.Building: building++; break;
+                    case StreetscapeGeometryType.Terrain:  terrain++;  break;
+                    default:                               other++;    break;
+                }
+            }
+
+            return $"building={building} terrain={terrain} other={other} unresolved={missing}";
+        }
+    }
+
+    /// <summary>Streetscape and occlusion state for the capture button.</summary>
+    public string StateReport =>
+        $"streetscape meshes : {MeshCount}\n" +
+        $"by type            : {GeometryTypeBreakdown}\n" +
+        $"ghosted meshes     : {GhostedCount}  (only possible where a Building mesh exists)\n" +
+        $"occluder cutout    : {CutoutReadout}\n" +
+        $"ghosting enabled   : {ghostTargetBuilding}\n" +
+        $"target anchor set  : {targetAnchor != null}\n" +
+        $"visualise meshes   : {visualiseMeshes}\n" +
+        $"materials          : occluder={(occluderMaterial != null)} ghost={(ghostMaterial != null)} " +
+        $"debug={(debugMaterial != null)}\n";
+
+    // --------------------------------------------------------------- lifecycle    // --------------------------------------------------------------- lifecycle
 
     void OnEnable()
     {
@@ -274,11 +367,6 @@ public class StreetscapeShadowSetup : MonoBehaviour
     {
         if (!ghostTargetBuilding) return false;
 
-        // An explicit tap beats any heuristic — and it is not restricted to Building meshes,
-        // because if you deliberately tapped a terrain mesh you probably meant to.
-        if (SelectionMode == GhostSelection.Manual)
-            return geometry.trackableId == _selectedId;
-
         if (targetAnchor == null) return false;
         if (geometry.streetscapeGeometryType != StreetscapeGeometryType.Building) return false;
 
@@ -289,122 +377,4 @@ public class StreetscapeShadowSetup : MonoBehaviour
         return renderer.bounds.Contains(targetAnchor.position);
     }
 
-    // ------------------------------------------------------------- tap to select
-
-    public string SelectionReadout =>
-        SelectionMode == GhostSelection.Manual
-            ? $"ghost: tapped ({GhostedCount})"
-            : $"ghost: auto ({GhostedCount})";
-
-    /// <summary>Back to picking by anchor containment.</summary>
-    public void ClearSelection()
-    {
-        if (SelectionMode == GhostSelection.AutoFromAnchor) return;
-
-        SelectionMode = GhostSelection.AutoFromAnchor;
-        _selectedId = default;
-        RefreshAllMaterials();
-    }
-
-    /// <summary>
-    /// Ghosts the nearest streetscape mesh under the ray. Intersection is done by hand
-    /// rather than with Physics.Raycast: that would need a MeshCollider on every geometry,
-    /// re-baked every time ARCore updates it, which is a per-frame cost for something that
-    /// only has to work at the moment of a tap.
-    /// </summary>
-    public bool TrySelectAt(Ray ray)
-    {
-        float best = float.MaxValue;
-        TrackableId bestId = default;
-        bool found = false;
-
-        foreach (var kv in _renderers)
-        {
-            var renderer = kv.Value;
-            if (renderer == null) continue;
-
-            // Cheap reject first — the bounds test is the AABB, which is wrong for picking
-            // but perfectly good for "this mesh is nowhere near the ray, skip it".
-            if (!renderer.bounds.IntersectRay(ray)) continue;
-
-            var filter = renderer.GetComponent<MeshFilter>();
-            var mesh = filter != null ? filter.sharedMesh : null;
-            if (mesh == null) continue;
-
-            if (RaycastMesh(ray, mesh, renderer.transform, out float distance) && distance < best)
-            {
-                best = distance;
-                bestId = kv.Key;
-                found = true;
-            }
-        }
-
-        if (!found) return false;
-
-        _selectedId = bestId;
-        SelectionMode = GhostSelection.Manual;
-        RefreshAllMaterials();
-
-        Debug.Log($"[Streetscape] ghosting tapped mesh {bestId} at {best:F1} m");
-        return true;
-    }
-
-    static bool RaycastMesh(Ray worldRay, Mesh mesh, Transform t, out float distance)
-    {
-        distance = float.MaxValue;
-
-        // Streetscape objects are placed at world poses with no scaling, so a distance
-        // measured in local space is already metres.
-        Vector3 origin = t.InverseTransformPoint(worldRay.origin);
-        Vector3 direction = t.InverseTransformDirection(worldRay.direction);
-
-        var vertices = mesh.vertices;
-        var triangles = mesh.triangles;
-        bool hit = false;
-
-        for (int i = 0; i < triangles.Length; i += 3)
-        {
-            if (RayTriangle(origin, direction,
-                            vertices[triangles[i]],
-                            vertices[triangles[i + 1]],
-                            vertices[triangles[i + 2]],
-                            out float d) && d < distance)
-            {
-                distance = d;
-                hit = true;
-            }
-        }
-
-        return hit;
-    }
-
-    /// <summary>
-    /// Möller–Trumbore, deliberately double-sided: streetscape meshes are not reliably
-    /// wound outward, which is also why the debug shader draws with Cull Off.
-    /// </summary>
-    static bool RayTriangle(Vector3 origin, Vector3 direction,
-                            Vector3 a, Vector3 b, Vector3 c, out float distance)
-    {
-        const float epsilon = 1e-7f;
-        distance = 0f;
-
-        Vector3 ab = b - a, ac = c - a;
-        Vector3 p = Vector3.Cross(direction, ac);
-        float det = Vector3.Dot(ab, p);
-
-        if (det > -epsilon && det < epsilon) return false;   // ray parallel to the triangle
-
-        float inv = 1f / det;
-        Vector3 s = origin - a;
-
-        float u = Vector3.Dot(s, p) * inv;
-        if (u < 0f || u > 1f) return false;
-
-        Vector3 q = Vector3.Cross(s, ab);
-        float v = Vector3.Dot(direction, q) * inv;
-        if (v < 0f || u + v > 1f) return false;
-
-        distance = Vector3.Dot(ac, q) * inv;
-        return distance > epsilon;
-    }
 }

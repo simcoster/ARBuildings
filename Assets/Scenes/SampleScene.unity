@@ -970,7 +970,7 @@ MonoBehaviour:
   nudge: {fileID: 1200000005}
   buildingLoader: {fileID: 1200000006}
   streetscapeShadows: {fileID: 379862632}
-  siteId: placeholder-01
+  siteId: synagogue-01
   latitude: 32.083789
   longitude: 34.814581
   altitudeAboveTerrain: 0
@@ -1039,11 +1039,12 @@ MonoBehaviour:
   source: 0
   streamingAssetsFile: synagogue.glb
   modelUrl: 
-  sizeMode: 1
+  sizeMode: 2
   targetHeightMetres: 10
   modelScale: 1
   footprintAxis: 0
   placement: {fileID: 0}
+  recenterOnAnchor: 1
 --- !u!114 &1200000007
 MonoBehaviour:
   m_ObjectHideFlags: 0

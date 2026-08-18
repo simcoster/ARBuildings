@@ -30,7 +30,6 @@ Assets/
 │   ├── StreetscapeOccluderShadow.shader  Step 10  (occlusion + shadow, two passes)
 │   └── GhostWireframe.shader         Step 10.5
 ├── StreamingAssets/
-│   ├── placeholder-building.glb
 │   └── buildings.json
 └── ARCoreExtensionsConfig.asset      Step 5
 ```

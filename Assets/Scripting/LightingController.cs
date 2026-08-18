@@ -186,6 +186,21 @@ public class LightingController : MonoBehaviour
         NorthKnown = true;
     }
 
+    /// <summary>Lighting state for the capture button — the answer to "is the sun real?".</summary>
+    public string StateReport =>
+        $"sun computed az/el : {SolarAzimuthDeg:F1} / {SolarElevationDeg:F1} deg\n" +
+        $"north offset       : {NorthOffsetDeg:F1} deg {(NorthKnown ? "(MEASURED from VPS)" : "(GUESSED - shadows meaningless)")}\n" +
+        $"forced daylight    : {forceDaylight}\n" +
+        $"sun light          : {(sunLight != null ? $"enabled={sunLight.enabled} intensity={sunLight.intensity:F2} colour={sunLight.color}" : "none")}\n" +
+        $"sun world forward  : {(sunLight != null ? sunLight.transform.forward.ToString() : "n/a")}\n" +
+        $"estimation mode    : {(cameraManager != null ? cameraManager.currentLightEstimation.ToString() : "no camera manager")}\n" +
+        $"estimated dir      : {(EstimatedLightTravel.HasValue ? EstimatedLightTravel.Value.ToString() : "none")}\n" +
+        $"estimated lumens   : {EstimatedLumens:F0}\n" +
+        $"estimated colour   : {EstimatedColour}\n" +
+        $"ambient lobes      : {AmbientLobeCount} (directionality {AmbientDirectionality:F2}x)\n" +
+        $"exposure           : {smoothedExposure:F2} EV (driven {driveExposure})\n" +
+        $"intensity divisor  : {intensityDivisor}\n";
+
     // ------------------------------------------------------- ambient probe analysis
 
     /// <summary>
@@ -311,6 +326,10 @@ public class LightingController : MonoBehaviour
         SolarAzimuthDeg = az;
         SolarElevationDeg = el;
 
+        // BEFORE the horizon test below: that path returns early, so at night north was
+        // never measured at all and stayed GUESSED until the next sunrise.
+        UpdateNorthAlignment();
+
         if (el <= 0f)                       // below the horizon
         {
             sunLight.enabled = false;
@@ -323,8 +342,6 @@ public class LightingController : MonoBehaviour
         // start — that is exactly why AREarthManager.Convert() exists. Rotate the bearing
         // into Unity's frame before using it, or the sun (and every cast shadow) points in a
         // direction that changes with whichever way the phone was facing at launch.
-        UpdateNorthAlignment();
-
         float yawRad = (az + NorthOffsetDeg) * Mathf.Deg2Rad;
         float elRad = el * Mathf.Deg2Rad;
 

@@ -496,6 +496,59 @@ public class GeospatialController : MonoBehaviour
     }
 
     /// <summary>
+    /// Everything this component knows, for the capture button. Each class reports its own
+    /// state so the dump cannot drift out of step with the code the way a central one would.
+    /// </summary>
+    public string StateReport
+    {
+        get
+        {
+            var report = $"site id            : {siteId}\n" +
+                         $"phase              : {CurrentPhase}\n" +
+                         $"readout            : {DebugReadout.Replace("\n", " | ")}\n" +
+                         $"configured lat/lng : {latitude:F7}, {longitude:F7}\n" +
+                         $"altitude above ter : {altitudeAboveTerrain}\n" +
+                         $"location service   : {_locationStatus}\n";
+
+            if (earthManager != null)
+            {
+                report += $"earth state        : {earthManager.EarthState}\n" +
+                          $"earth tracking     : {earthManager.EarthTrackingState}\n";
+
+                if (earthManager.EarthTrackingState == TrackingState.Tracking)
+                {
+                    var pose = earthManager.CameraGeospatialPose;
+                    report += $"camera lat/lng     : {pose.Latitude:F7}, {pose.Longitude:F7}\n" +
+                              $"camera altitude    : {pose.Altitude:F2} m\n" +
+                              $"camera heading     : {pose.Heading:F1} deg\n" +
+                              $"horiz accuracy     : {pose.HorizontalAccuracy:F2} m (gate {maxHorizontalAccuracy})\n" +
+                              $"yaw accuracy       : {pose.OrientationYawAccuracy:F1} deg (gate {maxYawAccuracy})\n";
+                }
+            }
+
+            CanSaveCoordinates(out string saveReason);
+            report += $"can save coords    : {saveReason}\n";
+
+            report += $"preview active     : {PreviewActive}\n";
+            if (PreviewActive)
+                report += $"preview            : {PreviewReadout.Replace("\n", " | ")}\n" +
+                          $"last placement     : {PlacementSource}\n";
+
+            if (AnchorTransform != null)
+            {
+                var camera = Camera.main;
+                float distance = camera != null
+                    ? Vector3.Distance(camera.transform.position, AnchorTransform.position)
+                    : -1f;
+                report += $"anchor world pos   : {AnchorTransform.position}\n" +
+                          $"anchor distance    : {distance:F1} m\n";
+            }
+
+            return report;
+        }
+    }
+
+    /// <summary>
     /// Whether a save can record real coordinates, and if not, what to do about it.
     ///
     /// The accuracy gate is the important part. ARCore will happily hand back a lat/lng

@@ -42,6 +42,12 @@ public static class SiteCatalog
         public float headingOffsetFromABDeg;
         public float modelFrontOffsetDeg;
 
+        /// <summary>"FootprintWidth" | "TargetHeight" | "FixedScale". Blank = leave as set.</summary>
+        public string sizeMode;
+
+        /// <summary>"X" or "Z" — which model axis the surveyed distance measures.</summary>
+        public string footprintAxis;
+
         public Footprint footprint;
 
         /// <summary>True when both corners are present, i.e. footprint mode is usable.</summary>

@@ -23,7 +23,7 @@ public class DebugHud : MonoBehaviour
     GUIStyle _label, _button, _box, _sliderTrack, _sliderThumb;
 
     /// <summary>What the next tap on the world will do. Armed by a button, fires once.</summary>
-    enum TapAction { None, GhostStreetscape, PlacePreview }
+    enum TapAction { None, PlacePreview }
 
     // Armed explicitly and cleared after one tap, so a stray touch while walking can't
     // silently re-ghost a building or teleport the model.
@@ -31,6 +31,11 @@ public class DebugHud : MonoBehaviour
     int _armedOnFrame;
     string _tapResult = "";
     bool _showLight;
+    string _captureResult = "";
+
+    /// <summary>Placement lives on the same object as the controller.</summary>
+    BuildingPlacement Placement =>
+        geospatial != null ? geospatial.GetComponent<BuildingPlacement>() : null;
 
     void Awake()
     {
@@ -79,24 +84,13 @@ public class DebugHud : MonoBehaviour
 
         if (point == null) return;
 
-        var action = _tapAction;
         _tapAction = TapAction.None;
 
         var cam = Camera.main;
         if (cam == null) { _tapResult = "no camera"; return; }
 
-        if (action == TapAction.GhostStreetscape)
-        {
-            _tapResult = streetscape != null &&
-                         streetscape.TrySelectAt(cam.ScreenPointToRay(point.Value))
-                ? "ghosted"
-                : "nothing under that tap";
-        }
-        else
-        {
-            bool placed = geospatial != null && geospatial.TryPlacePreviewAt(point.Value);
-            _tapResult = geospatial != null ? geospatial.PlacementSource : "no controller";
-        }
+        bool placed = geospatial != null && geospatial.TryPlacePreviewAt(point.Value);
+        _tapResult = geospatial != null ? geospatial.PlacementSource : "no controller";
     }
 
     /// <summary>
@@ -206,14 +200,13 @@ public class DebugHud : MonoBehaviour
         if (streetscape != null)
         {
             text += $"streetscape: {streetscape.MeshCount} meshes\n" +
-                    $"  {streetscape.SelectionReadout}\n";
+                    $"  {streetscape.GeometryTypeBreakdown}\n" +
+                    $"  cutout: {streetscape.CutoutReadout}\n";
 
             if (streetscape.DebugMaterialMissing)
                 text += "  NO DEBUG MATERIAL — assign it on XR Origin\n";
 
-            if (_tapAction == TapAction.GhostStreetscape)
-                text += "  TAP A BUILDING TO GHOST IT\n";
-            else if (_tapResult != "") text += $"  tap: {_tapResult}\n";
+            if (_tapResult != "") text += $"  tap: {_tapResult}\n";
 
             text += "\n";
         }
@@ -243,26 +236,6 @@ public class DebugHud : MonoBehaviour
                        streetscape.VisualiseMeshes ? "mesh ON" : "mesh", _button))
             streetscape.VisualiseMeshes = !streetscape.VisualiseMeshes;
 
-        // --- tap to pick the ghosted building ---
-        if (streetscape != null)
-        {
-            bool armed = _tapAction == TapAction.GhostStreetscape;
-            var tapBg = GUI.backgroundColor;
-            if (armed) GUI.backgroundColor = Color.yellow;
-
-            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 2.4f, w * 0.22f, btnH),
-                           armed ? "tap..." : "pick", _button))
-                ArmTap(armed ? TapAction.None : TapAction.GhostStreetscape);
-
-            GUI.backgroundColor = tapBg;
-
-            // Only offered once a tap has overridden the automatic choice.
-            if (streetscape.SelectionMode == StreetscapeShadowSetup.GhostSelection.Manual &&
-                GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 3.6f, w * 0.22f, btnH),
-                           "auto", _button))
-                streetscape.ClearSelection();
-        }
-
         // --- light estimation dome ---
         if (lighting != null)
         {
@@ -277,6 +250,16 @@ public class DebugHud : MonoBehaviour
 
             if (_showLight) DrawLightDome(w, pad, btnH);
         }
+
+        // --- capture: screenshot + full state dump, for diagnosing this away from the site ---
+        if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 6f, w * 0.22f, btnH),
+                       "capture", _button))
+            _captureResult = DebugCapture.Take(geospatial, loader, nudge, lighting,
+                                               streetscape, Placement);
+
+        if (_captureResult != "")
+            GUI.Label(new Rect(w - pad - w * 0.42f, pad + btnH * 7.1f, w * 0.4f, btnH),
+                      _captureResult, _label);
 
         DrawPreviewControls(w, pad, btnH);
 

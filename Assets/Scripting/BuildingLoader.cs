@@ -1,3 +1,4 @@
+using System;
 using GLTFast;
 using UnityEngine;
 
@@ -67,20 +68,58 @@ public class BuildingLoader : MonoBehaviour
              "automatically if left empty.")]
     [SerializeField] BuildingPlacement placement;
 
-    [Tooltip("Move the model so it sits ON the anchor: horizontally centred, base at ground " +
-             "level. CAD exports routinely put the origin hundreds of metres from the " +
-             "geometry, and then the building is placed correctly but drawn off in a field " +
-             "somewhere. Turn off only when the model's origin is already meaningful.")]
+    [Tooltip("Move the model so it sits ON the anchor, base at ground level. CAD exports " +
+             "routinely put the origin hundreds of metres from the geometry, and then the " +
+             "building is placed correctly but drawn off in a field somewhere. Turn off only " +
+             "when the model's origin is already meaningful.")]
     [SerializeField] bool recenterOnAnchor = true;
+
+    public enum AnchorAlign
+    {
+        /// <summary>Put the model's middle on the anchor.</summary>
+        Centre,
+
+        /// <summary>
+        /// Put the model's FRONT FACE on the anchor. Correct whenever the anchor coordinate
+        /// was surveyed on the facade — as footprint corner A is — because centring then
+        /// buries half the building's depth behind the real wall.
+        /// </summary>
+        FrontFace,
+    }
+
+    [Tooltip("Which part of the model lands on the anchor. FrontFace when the surveyed " +
+             "coordinate is a point on the facade; Centre when it is the middle of the plot.")]
+    [SerializeField] AnchorAlign anchorAlign = AnchorAlign.FrontFace;
 
     /// <summary>What the sizing step actually did — the HUD reports it.</summary>
     public float AppliedScale { get; private set; } = 1f;
+
+    /// <summary>The transform the model was instantiated under, i.e. the AlignmentRoot.</summary>
+    public Transform LoadedParent { get; private set; }
+
+    /// <summary>
+    /// The model box in LoadedParent space, after scaling and recentring — real metres.
+    /// The occluder cutout is built from this, so the hole is exactly the size of the
+    /// building that is standing in the hole.
+    /// </summary>
+    public Bounds LocalBounds { get; private set; }
 
     /// <summary>
     /// Height in ALIGNMENT-ROOT metres — real building metres, independent of any preview
     /// shrinking applied above it. Preview placement needs this to pick a size that fits.
     /// </summary>
     public float ModelHeightMetres { get; private set; }
+
+    /// <summary>Model state for the capture button.</summary>
+    public string StateReport =>
+        $"model file         : {streamingAssetsFile}\n" +
+        $"load state         : {State} ({LastMessage})\n" +
+        $"renderers          : {RendererCount}\n" +
+        $"size mode          : {sizeMode} (axis {footprintAxis}, target {targetHeightMetres} m)\n" +
+        $"applied scale      : x{AppliedScale:F4}\n" +
+        $"recenter on anchor : {recenterOnAnchor}\n" +
+        $"model height       : {ModelHeightMetres:F2} m (alignment-root metres)\n" +
+        $"world bounds@load  : {BoundsSize.x:F1} x {BoundsSize.y:F1} x {BoundsSize.z:F1} m\n";
 
     void Awake() => Instance = this;
 
@@ -91,7 +130,18 @@ public class BuildingLoader : MonoBehaviour
 
         streamingAssetsFile = site.model;
         source = ModelSource.StreamingAssets;
-        Debug.Log($"[Sites] model file: {streamingAssetsFile}");
+
+        // Sizing comes from the file too. Which axis the surveyed distance measures is a
+        // property of the SITE, not of the app, and having it inspector-only meant a wrong
+        // axis could only be fixed with a full rebuild.
+        if (!string.IsNullOrEmpty(site.sizeMode) &&
+            Enum.TryParse(site.sizeMode, true, out SizeMode parsedMode))
+            sizeMode = parsedMode;
+
+        if (!string.IsNullOrEmpty(site.footprintAxis))
+            footprintAxis = site.footprintAxis.Trim().ToUpperInvariant() == "X" ? Axis.X : Axis.Z;
+
+        Debug.Log($"[Sites] model {streamingAssetsFile}, sizing {sizeMode} axis {footprintAxis}");
     }
 
     /// <summary>
@@ -186,6 +236,8 @@ public class BuildingLoader : MonoBehaviour
         if (renderers.Length > 0)
         {
             BoundsSize = MeasureWorldBounds(renderers).size;
+            LoadedParent = parent;
+            LocalBounds = MeasureLocalBounds(parent, renderers);
 
             float parentScaleY = Mathf.Abs(parent.lossyScale.y);
             ModelHeightMetres = parentScaleY > 1e-6f ? BoundsSize.y / parentScaleY : BoundsSize.y;
@@ -214,9 +266,12 @@ public class BuildingLoader : MonoBehaviour
 
         var local = MeasureLocalBounds(parent, renderers);
 
-        // Horizontal: centre on the anchor. Vertical: put the base on it, not the middle —
-        // a building sits on the ground rather than being impaled by it.
-        var offset = new Vector3(-local.center.x, -local.min.y, -local.center.z);
+        // Across the facade: centre on the anchor. Vertically: base on it, not the middle —
+        // a building sits on the ground rather than being impaled by it. In depth: the front
+        // face, because the surveyed point is on the facade; centring would push half the
+        // building's depth out through the real wall towards the viewer.
+        float depth = anchorAlign == AnchorAlign.FrontFace ? -local.max.z : -local.center.z;
+        var offset = new Vector3(-local.center.x, -local.min.y, depth);
 
         if (offset.magnitude > 0.01f)
             Debug.Log($"[Loader] recentring model by {offset.x:F2}, {offset.y:F2}, " +
