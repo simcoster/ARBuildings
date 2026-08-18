@@ -24,22 +24,54 @@ public class BuildingLoader : MonoBehaviour
 
     [SerializeField] ModelSource source = ModelSource.StreamingAssets;
 
-    [Tooltip("File name inside Assets/StreamingAssets, e.g. abandoned-house.glb")]
-    [SerializeField] string streamingAssetsFile = "abandoned-house.glb";
+    [Tooltip("File name inside Assets/StreamingAssets, e.g. synagogue.glb")]
+    [SerializeField] string streamingAssetsFile = "synagogue.glb";
 
     [Tooltip("Must return binary GLB, not an HTML page. If loading fails, curl -L the URL " +
              "and check the first bytes before blaming glTFast.")]
     [SerializeField] string modelUrl;
 
+    public enum SizeMode
+    {
+        /// <summary>Use modelScale verbatim.</summary>
+        FixedScale,
+
+        /// <summary>Scale so the model stands targetHeightMetres tall.</summary>
+        TargetHeight,
+
+        /// <summary>
+        /// Scale so the model's facade matches the measured distance between the two
+        /// footprint corners. The most trustworthy option by far: it is derived from
+        /// coordinates you surveyed rather than a number anyone typed in.
+        /// </summary>
+        FootprintWidth,
+    }
+
     [Header("Sizing")]
-    [Tooltip("Scale the model so its bounding box is this many metres tall, ignoring " +
-             "modelScale. Set this when you don't know the asset's units — AI-generated " +
-             "and asset-store models are usually authored at unit scale, not metres. " +
-             "0 = off.")]
+    [SerializeField] SizeMode sizeMode = SizeMode.FootprintWidth;
+
+    [Tooltip("Used by TargetHeight. The real building's height in metres.")]
     [SerializeField] float targetHeightMetres = 10f;
 
-    [Tooltip("Uniform scale, used only when targetHeightMetres is 0.")]
+    [Tooltip("Used by FixedScale.")]
     [SerializeField] float modelScale = 1f;
+
+    public enum Axis { X, Z }
+
+    [Tooltip("Used by FootprintWidth: which of the model's own horizontal axes runs along " +
+             "the facade. X matches the convention in BuildingPlacement (A->B runs along " +
+             "the model's local +X). Flip to Z if the building comes out square-on.")]
+    [SerializeField] Axis footprintAxis = Axis.Z;
+
+    [Tooltip("Optional. Supplies the surveyed facade length for FootprintWidth. Found " +
+             "automatically if left empty.")]
+    [SerializeField] BuildingPlacement placement;
+
+    [Tooltip("Move the model so it sits ON the anchor: horizontally centred, base at ground " +
+             "level. CAD exports routinely put the origin hundreds of metres from the " +
+             "geometry, and then the building is placed correctly but drawn off in a field " +
+             "somewhere. Turn off only when the model's origin is already meaningful.")]
+    [SerializeField] bool recenterOnAnchor = true;
 
     /// <summary>What the sizing step actually did — the HUD reports it.</summary>
     public float AppliedScale { get; private set; } = 1f;
@@ -51,6 +83,16 @@ public class BuildingLoader : MonoBehaviour
     public float ModelHeightMetres { get; private set; }
 
     void Awake() => Instance = this;
+
+    /// <summary>Lets buildings.json name the model, so switching site switches asset too.</summary>
+    public void ApplySite(SiteCatalog.Site site)
+    {
+        if (site == null || string.IsNullOrEmpty(site.model)) return;
+
+        streamingAssetsFile = site.model;
+        source = ModelSource.StreamingAssets;
+        Debug.Log($"[Sites] model file: {streamingAssetsFile}");
+    }
 
     /// <summary>
     /// StreamingAssets is not a real directory on Android — it is served from inside the APK
@@ -130,6 +172,8 @@ public class BuildingLoader : MonoBehaviour
         AppliedScale = ResolveScale(parent, renderers);
         if (glbRoot != null) glbRoot.localScale = importedScale * AppliedScale;
 
+        if (glbRoot != null && recenterOnAnchor) RecenterOnAnchor(parent, glbRoot, renderers);
+
         // Don't assume the importer got this right: a glTF material flagged transparent or
         // double-sided can come in with casting off, and then the building silently throws
         // no shadow at all. It is the one thing that sells the model as really being there.
@@ -161,33 +205,119 @@ public class BuildingLoader : MonoBehaviour
     }
 
     /// <summary>
+    /// Slides the model so its footprint is centred on the anchor with its base on the
+    /// ground. Measured after scaling, so the correction is in real metres.
+    /// </summary>
+    void RecenterOnAnchor(Transform parent, Transform glbRoot, Renderer[] renderers)
+    {
+        if (renderers.Length == 0) return;
+
+        var local = MeasureLocalBounds(parent, renderers);
+
+        // Horizontal: centre on the anchor. Vertical: put the base on it, not the middle —
+        // a building sits on the ground rather than being impaled by it.
+        var offset = new Vector3(-local.center.x, -local.min.y, -local.center.z);
+
+        if (offset.magnitude > 0.01f)
+            Debug.Log($"[Loader] recentring model by {offset.x:F2}, {offset.y:F2}, " +
+                      $"{offset.z:F2} m — its origin was off in the distance");
+
+        glbRoot.localPosition += offset;
+    }
+
+    /// <summary>
+    /// The model's own bounding box, measured in the ALIGNMENT ROOT's space where one unit
+    /// is one real metre.
+    ///
+    /// Not renderer.bounds: that is a world-space AABB, so once the parent chain carries a
+    /// heading rotation the "width" of the box is a mix of the model's width and depth. For
+    /// height that error cancels — a yaw never tilts anything — which is why the height fit
+    /// worked, but it would quietly corrupt a facade measurement.
+    /// </summary>
+    static Bounds MeasureLocalBounds(Transform space, Renderer[] renderers)
+    {
+        var bounds = new Bounds();
+        bool started = false;
+
+        foreach (var renderer in renderers)
+        {
+            var filter = renderer.GetComponent<MeshFilter>();
+            var mesh = filter != null ? filter.sharedMesh : null;
+            if (mesh == null) continue;
+
+            Bounds local = mesh.bounds;
+            Matrix4x4 toSpace = space.worldToLocalMatrix * renderer.transform.localToWorldMatrix;
+
+            for (int corner = 0; corner < 8; corner++)
+            {
+                var point = toSpace.MultiplyPoint3x4(new Vector3(
+                    (corner & 1) == 0 ? local.min.x : local.max.x,
+                    (corner & 2) == 0 ? local.min.y : local.max.y,
+                    (corner & 4) == 0 ? local.min.z : local.max.z));
+
+                if (!started) { bounds = new Bounds(point, Vector3.zero); started = true; }
+                else bounds.Encapsulate(point);
+            }
+        }
+
+        return bounds;
+    }
+
+    /// <summary>
     /// Works out the uniform scale to apply. Measured in the ALIGNMENT ROOT's space, where
-    /// one unit is one real metre — so a target height stays a real-world height even when
-    /// the whole hierarchy is shrunk, as preview mode shrinks it.
+    /// one unit is one real metre — so a target size stays a real-world size even when the
+    /// whole hierarchy is shrunk, as preview mode shrinks it.
     /// </summary>
     float ResolveScale(Transform parent, Renderer[] renderers)
     {
-        if (targetHeightMetres <= 0f) return modelScale;
+        if (renderers.Length == 0) return modelScale;
 
-        if (renderers.Length == 0)
+        // ModelHeightMetres is deliberately not set here — the caller recomputes it after the
+        // scale is applied, and it must be the finished height, not the authored one.
+        var local = MeasureLocalBounds(parent, renderers);
+
+        Debug.Log($"[Loader] authored size {local.size.x:F2} x {local.size.y:F2} x " +
+                  $"{local.size.z:F2} (model units)");
+
+        if (sizeMode == SizeMode.FootprintWidth)
         {
-            Debug.LogWarning("[Loader] targetHeightMetres set but the model has no renderers.");
-            return modelScale;
+            if (placement == null) placement = FindAnyObjectByType<BuildingPlacement>();
+
+            double facade = placement != null ? placement.FootprintLengthMetres : 0.0;
+            float width = footprintAxis == Axis.X ? local.size.x : local.size.z;
+
+            if (facade <= 0.01)
+            {
+                Debug.LogWarning("[Loader] FootprintWidth needs footprint mode enabled on " +
+                                 "BuildingPlacement with both corners set — falling back.");
+            }
+            else if (width <= 1e-6f)
+            {
+                Debug.LogWarning($"[Loader] model has no extent along {footprintAxis}.");
+            }
+            else
+            {
+                float fitted = (float)facade / width;
+                Debug.Log($"[Loader] facade is {facade:F2} m surveyed, model is {width:F2} " +
+                          $"along {footprintAxis}; scaling x{fitted:F4}");
+                return fitted;
+            }
         }
 
-        float parentScaleY = Mathf.Abs(parent.lossyScale.y);
-        float worldHeight = MeasureWorldBounds(renderers).size.y;
-        float localHeight = parentScaleY > 1e-6f ? worldHeight / parentScaleY : worldHeight;
-
-        if (localHeight <= 1e-6f)
+        if (sizeMode == SizeMode.TargetHeight && targetHeightMetres > 0f)
         {
-            Debug.LogWarning("[Loader] model has zero height — cannot scale to target.");
-            return modelScale;
+            if (local.size.y <= 1e-6f)
+            {
+                Debug.LogWarning("[Loader] model has zero height — cannot scale to target.");
+                return modelScale;
+            }
+
+            float scale = targetHeightMetres / local.size.y;
+            Debug.Log($"[Loader] model is {local.size.y:F2} tall as authored; " +
+                      $"scaling x{scale:F4} to reach {targetHeightMetres} m.");
+            return scale;
         }
 
-        float scale = targetHeightMetres / localHeight;
-        Debug.Log($"[Loader] model is {localHeight:F2} m tall as authored; " +
-                  $"scaling x{scale:F2} to reach {targetHeightMetres} m.");
-        return scale;
+        return modelScale;
     }
 }

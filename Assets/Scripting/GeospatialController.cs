@@ -111,6 +111,7 @@ public class GeospatialController : MonoBehaviour
     public Transform AnchorTransform { get; private set; }
 
     bool _placed;
+    bool _siteReady;   // buildings.json read; nothing places before this
     float _logTimer;
     string _locationStatus = "not started";
 
@@ -139,10 +140,40 @@ public class GeospatialController : MonoBehaviour
     {
         if (startLocationService) StartCoroutine(RunLocationService());
 
+        StartCoroutine(LoadSiteThenBegin());
+    }
+
+    /// <summary>
+    /// Site data comes from buildings.json before anything is placed, so the coordinates
+    /// live in a reviewable file rather than only inside the scene. Placement waits for it —
+    /// resolving an anchor at the inspector's coordinates first would put the building in
+    /// the wrong place for a second and then move it.
+    /// </summary>
+    System.Collections.IEnumerator LoadSiteThenBegin()
+    {
+        SiteCatalog.Site site = null;
+        yield return SiteCatalog.Load(siteId, loaded => site = loaded);
+
+        if (site != null)
+        {
+            if (placement != null) placement.ApplySite(site);
+            if (buildingLoader != null) buildingLoader.ApplySite(site);
+
+            if (!site.HasFootprint && System.Math.Abs(site.latitude) > 0.0001)
+            {
+                latitude = site.latitude;
+                longitude = site.longitude;
+            }
+
+            altitudeAboveTerrain = site.altitudeAboveTerrain;
+        }
+
+        _siteReady = true;
+
         if (previewMode)
         {
             EnterPreview();
-            return;
+            yield break;
         }
 
         if (debugPlaceWithoutLocalization) PlaceWithoutLocalization();
@@ -220,6 +251,8 @@ public class GeospatialController : MonoBehaviour
             if (_previewRoot != null) RefreshPreviewEarthStatus();
             return;
         }
+
+        if (!_siteReady) return;   // don't anchor at inspector coords the file will replace
 
         // EarthState is the diagnostic that matters: it separates "API key rejected" and
         // "Geospatial disabled" from "still warming up". EarthTrackingState collapses them

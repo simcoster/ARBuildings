@@ -19,13 +19,22 @@ public class BuildingPlacement : MonoBehaviour
     [SerializeField] double cornerALatitude;
     [SerializeField] double cornerALongitude;
 
-    [Tooltip("Corner B, along the same facade. A->B must run in the direction of the " +
-             "model's local +X axis (for the placeholder, its 24 m width).")]
+    [Tooltip("The second measured point. Two ways to pick it, and the offset below is what " +
+             "tells them apart:\n" +
+             "  ALONG THE FACADE — A and B are two corners of the front wall, and the " +
+             "distance is the building's WIDTH.\n" +
+             "  FRONT TO BACK — A is on the facade and B is the back corner, and the " +
+             "distance is the building's DEPTH.")]
     [SerializeField] double cornerBLatitude;
     [SerializeField] double cornerBLongitude;
 
-    [Tooltip("Model +Z (its front) relative to the A->B line. -90 puts the front to the " +
-             "RIGHT as you walk A->B. Flip to +90 if it ends up facing the wrong way.")]
+    [Tooltip("Where the model's front (+Z) points, relative to the A->B line.\n" +
+             "  -90 / +90 — A->B runs ALONG the facade; the front is to the right / left " +
+             "as you walk A->B.\n" +
+             "  180 — A->B runs FRONT TO BACK; the front faces back down the line, from B " +
+             "towards A.\n" +
+             "Whichever you use, BuildingLoader's footprint axis must match: X for a width " +
+             "measurement, Z for a depth one.")]
     [SerializeField] float headingOffsetFromABDeg = -90f;
 
     [Header("Rotation 1 — used only when footprint mode is OFF")]
@@ -64,6 +73,36 @@ public class BuildingPlacement : MonoBehaviour
 
     /// <summary>Rotation 2, exposed so preview mode can aim the model's front at the viewer.</summary>
     public float ModelFrontOffsetDeg => modelFrontOffsetDeg;
+
+    /// <summary>
+    /// Applies site data read from buildings.json, overriding whatever the inspector holds.
+    /// The file wins on purpose: it is the copy that can be reviewed and version-controlled.
+    /// </summary>
+    public void ApplySite(SiteCatalog.Site site)
+    {
+        if (site == null) return;
+
+        modelFrontOffsetDeg = site.modelFrontOffsetDeg;
+
+        if (site.HasFootprint)
+        {
+            useFootprint = true;
+            cornerALatitude = site.footprint.cornerA.latitude;
+            cornerALongitude = site.footprint.cornerA.longitude;
+            cornerBLatitude = site.footprint.cornerB.latitude;
+            cornerBLongitude = site.footprint.cornerB.longitude;
+            headingOffsetFromABDeg = site.headingOffsetFromABDeg;
+
+            Debug.Log($"[Sites] footprint mode: {FootprintLengthMetres:F2} m between corners, " +
+                      $"heading {EffectiveHeadingDeg:F2}°");
+        }
+        else
+        {
+            useFootprint = false;
+            buildingHeadingDeg = site.headingDeg;
+            Debug.Log($"[Sites] manual heading {buildingHeadingDeg:F2}°");
+        }
+    }
 
     /// <summary>Where the anchor goes when footprint mode is on.</summary>
     public bool TryGetAnchorLatLng(out double latitude, out double longitude)

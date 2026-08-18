@@ -261,6 +261,8 @@ MonoBehaviour:
   forcedSunElevation: 45
   forcedSunAzimuth: 135
   forcedSunIntensity: 1.4
+  earthManager: {fileID: 0}
+  fallbackNorthOffsetDeg: 0
   driveExposure: 1
   exposureSmoothing: 1.5
   middleGrey: 0.18
@@ -981,6 +983,10 @@ MonoBehaviour:
   previewStandoff: 2.5
   previewEyeHeight: 1.6
   previewCamera: {fileID: 0}
+  shadowCatcherMaterial: {fileID: 0}
+  shadowGroundScale: 3
+  previewFitFraction: 0.5
+  maxPlacementDistance: 8
   logStatus: 1
   startLocationService: 1
 --- !u!114 &1200000004
@@ -1017,9 +1023,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1c49ce1ed313b1544b1c5ae19fe60a35, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  arCamera: {fileID: 899767526}
-  panMetresPerPixel: 0.02
-  deadZonePixels: 6
+  fileName: adjustments.json
 --- !u!114 &1200000006
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1033,10 +1037,13 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   source: 0
-  streamingAssetsFile: abandoned-house.glb
+  streamingAssetsFile: synagogue.glb
   modelUrl: 
+  sizeMode: 1
   targetHeightMetres: 10
   modelScale: 1
+  footprintAxis: 0
+  placement: {fileID: 0}
 --- !u!114 &1200000007
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1054,7 +1061,6 @@ MonoBehaviour:
   lighting: {fileID: 379862631}
   loader: {fileID: 0}
   streetscape: {fileID: 0}
-  heightRange: 5
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

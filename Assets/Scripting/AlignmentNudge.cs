@@ -127,6 +127,11 @@ public class AlignmentNudge : MonoBehaviour
             // live in the first 2% of the travel, so this one is logarithmic.
             case Param.Scale:  min = 0.1f;  max = 50f;  logarithmic = true;  break;
 
+            // Ground offsets reach much further than height ever needs to: VPS can be tens
+            // of metres out, and you may want to walk the building down the street.
+            case Param.East:
+            case Param.North:  min = -200f; max = 200f; logarithmic = false; break;
+
             default:           min = -50f;  max = 50f;  logarithmic = false; break;
         }
     }

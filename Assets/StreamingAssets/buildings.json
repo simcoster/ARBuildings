@@ -1,21 +1,48 @@
 {
   "_comment": [
     "Authoritative site data. The nudge UI (Step 9) is for finding these numbers on site;",
-    "once found, bake them in HERE. PlayerPrefs is a per-user refinement on top of this",
-    "baseline, not where the real value lives — that's one wipe away from gone.",
+    "once found, bake them in HERE. adjustments.json on the device is a per-user refinement",
+    "on top of this baseline, not where the real value lives — it is one wipe away from gone.",
     "Coordinates to 6+ decimal places, from Google Earth Pro or a survey, not a phone GPS.",
-    "headingDeg is the TRUE-north azimuth of the model's front, 0-360 clockwise."
+    "headingDeg is the TRUE-north azimuth of the model's front, 0-360 clockwise.",
+    "In footprint mode headingDeg is DERIVED from the two corners and this value is a record",
+    "of what that derivation produced, not an input."
   ],
   "buildings": [
     {
+      "id": "synagogue-01",
+      "name": "Synagogue",
+      "model": "synagogue.glb",
+      "footprint": {
+        "_comment": [
+          "These two points run FRONT TO BACK, not along a wall — A is on the facade and B",
+          "is the back corner (as marked in Google Earth). So the measured distance is the",
+          "building's DEPTH, and the front faces back down the line from B towards A."
+        ],
+        "cornerA": { "latitude": 32.0835306, "longitude": 34.8150972, "dms": "32 5 0.71 N, 34 48 54.35 E", "role": "facade" },
+        "cornerB": { "latitude": 32.0832389, "longitude": 34.8153667, "dms": "32 4 59.66 N, 34 48 55.32 E", "role": "back corner" },
+        "depthMetres": 41.19,
+        "bearingABDeg": 141.95
+      },
+      "altitudeAboveTerrain": 0.0,
+      "headingOffsetFromABDeg": 180.0,
+      "headingDeg": 321.95,
+      "_headingNote": [
+        "321.95 = bearing(A->B) 141.95 + 180. The facade looks north-west, away from the back",
+        "corner. Scale comes from the same pair: fit the model's DEPTH (Z) to 41.19 m, which",
+        "means BuildingLoader's footprintAxis must be Z, not X."
+      ],
+      "modelFrontOffsetDeg": 0.0
+    },
+    {
       "id": "placeholder-01",
       "name": "Placeholder building",
+      "model": "placeholder-building.glb",
       "latitude": 32.083789,
       "longitude": 34.814581,
       "altitudeAboveTerrain": 0.0,
       "headingDeg": 328.0,
-      "modelFrontOffsetDeg": 0.0,
-      "modelUrl": "https://www.googleapis.com/drive/v3/files/FILE_ID?alt=media&key=YOUR_API_KEY"
+      "modelFrontOffsetDeg": 0.0
     }
   ]
 }
