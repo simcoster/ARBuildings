@@ -64,3 +64,4 @@ Thumbs.db
 
 # Source art: originals kept out of the build and out of git
 /ModelSource/
+/tools/encoder_bench/android
