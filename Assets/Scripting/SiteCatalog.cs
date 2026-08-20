@@ -45,8 +45,16 @@ public static class SiteCatalog
         /// <summary>"FootprintWidth" | "TargetHeight" | "FixedScale". Blank = leave as set.</summary>
         public string sizeMode;
 
-        /// <summary>"X" or "Z" — which model axis the surveyed distance measures.</summary>
+        /// <summary>"X" or "Z" — which model axis is being fitted.</summary>
         public string footprintAxis;
+
+        /// <summary>
+        /// Metres to fit that axis to. Overrides the corner-to-corner distance, because
+        /// the dimension worth fitting is often NOT the one that was pinned — here the
+        /// pins measure a narrow entrance block while the model box spans the main mass.
+        /// 0 = use the pinned distance.
+        /// </summary>
+        public float fitMetres;
 
         public Footprint footprint;
 
@@ -65,6 +73,16 @@ public static class SiteCatalog
 
     public const string FileName = "buildings.json";
 
+    /// <summary>Which copy was used last: "device" or "apk". Shown in the HUD.</summary>
+    public static string LastSource { get; private set; } = "none";
+
+    /// <summary>
+    /// A writable override, so coordinates can be corrected with `adb push` instead of a
+    /// rebuild. The APK copy is the seed and the fallback.
+    /// </summary>
+    public static string DevicePath =>
+        System.IO.Path.Combine(Application.persistentDataPath, FileName);
+
     /// <summary>
     /// Fetches the entry for a site id. Uses UnityWebRequest for the same reason the GLB
     /// loader does: on Android, StreamingAssets lives inside the APK and cannot be opened
@@ -72,6 +90,18 @@ public static class SiteCatalog
     /// </summary>
     public static IEnumerator Load(string siteId, Action<Site> onDone)
     {
+        // Device copy first: pushing one over adb turns a wrong coordinate from a 15-minute
+        // rebuild into a file copy and an app restart.
+        if (System.IO.File.Exists(DevicePath))
+        {
+            LastSource = "device";
+            Debug.Log($"[Sites] using DEVICE copy {DevicePath}");
+            Deliver(System.IO.File.ReadAllText(DevicePath), siteId, onDone);
+            yield break;
+        }
+
+        LastSource = "apk";
+
         var path = $"{Application.streamingAssetsPath}/{FileName}";
         var url = path.Contains("://") ? path : $"file://{path}";
 
@@ -86,23 +116,28 @@ public static class SiteCatalog
             yield break;
         }
 
+        Deliver(request.downloadHandler.text, siteId, onDone);
+    }
+
+    static void Deliver(string json, string siteId, Action<Site> onDone)
+    {
         Catalog catalog;
         try
         {
-            catalog = JsonUtility.FromJson<Catalog>(request.downloadHandler.text);
+            catalog = JsonUtility.FromJson<Catalog>(json);
         }
         catch (Exception e)
         {
             Debug.LogError($"[Sites] {FileName} is not valid JSON: {e.Message}");
             onDone(null);
-            yield break;
+            return;
         }
 
         if (catalog?.buildings == null || catalog.buildings.Length == 0)
         {
             Debug.LogWarning($"[Sites] {FileName} has no buildings array.");
             onDone(null);
-            yield break;
+            return;
         }
 
         var site = Array.Find(catalog.buildings, b => b != null && b.id == siteId);
@@ -112,7 +147,7 @@ public static class SiteCatalog
             Debug.LogWarning($"[Sites] no entry for '{siteId}' in {FileName}. " +
                              $"Known ids: {string.Join(", ", Array.ConvertAll(catalog.buildings, b => b?.id))}");
             onDone(null);
-            yield break;
+            return;
         }
 
         Debug.Log($"[Sites] loaded '{site.id}' ({site.name}) from {FileName}");

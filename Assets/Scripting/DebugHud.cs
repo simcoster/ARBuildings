@@ -18,6 +18,7 @@ public class DebugHud : MonoBehaviour
     [SerializeField] LightingController lighting;
     [SerializeField] BuildingLoader loader;
     [SerializeField] StreetscapeShadowSetup streetscape;
+    [SerializeField] AdaptiveQuality quality;
 
     bool _visible = true;
     GUIStyle _label, _button, _box, _sliderTrack, _sliderThumb;
@@ -45,6 +46,7 @@ public class DebugHud : MonoBehaviour
         if (lighting == null) lighting = FindAnyObjectByType<LightingController>();
         if (loader == null) loader = FindAnyObjectByType<BuildingLoader>();
         if (streetscape == null) streetscape = FindAnyObjectByType<StreetscapeShadowSetup>();
+        if (quality == null) quality = FindAnyObjectByType<AdaptiveQuality>();
     }
 
     // AlignmentNudge enables this too; the support is reference-counted, so both can.
@@ -178,7 +180,12 @@ public class DebugHud : MonoBehaviour
         var text = "";
 
         if (geospatial != null)
-            text += $"[{geospatial.CurrentPhase}]\n{geospatial.DebugReadout}\n\n";
+            text += $"[{geospatial.CurrentPhase}] cfg:{SiteCatalog.LastSource}\n" +
+                    $"{geospatial.DebugReadout}\n\n";
+
+        // Near the top: the tier silently changes shadow distance, so when shadows go
+        // missing this is the first line worth reading.
+        if (quality != null) text += quality.DebugReadout + "\n\n";
 
         // Only meaningful once something has been placed.
         if (geospatial != null && geospatial.CurrentPhase == GeospatialController.Phase.Placed)
@@ -201,6 +208,7 @@ public class DebugHud : MonoBehaviour
         {
             text += $"streetscape: {streetscape.MeshCount} meshes\n" +
                     $"  {streetscape.GeometryTypeBreakdown}\n" +
+                    $"  target: {streetscape.BuildingProximityReadout}\n" +
                     $"  cutout: {streetscape.CutoutReadout}\n";
 
             if (streetscape.DebugMaterialMissing)
@@ -251,6 +259,38 @@ public class DebugHud : MonoBehaviour
             if (_showLight) DrawLightDome(w, pad, btnH);
         }
 
+        // --- master occlusion switch ---
+        if (streetscape != null)
+        {
+            var occBg = GUI.backgroundColor;
+            if (!streetscape.OccludersEnabled) GUI.backgroundColor = new Color(1f, 0.55f, 0.1f);
+
+            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 7.2f, w * 0.22f, btnH),
+                           streetscape.OccludersEnabled ? "occlude" : "OCC OFF", _button))
+                streetscape.OccludersEnabled = !streetscape.OccludersEnabled;
+
+            GUI.backgroundColor = occBg;
+        }
+
+        // --- cutout on/off, to compare against the real world without a rebuild ---
+        if (streetscape != null)
+        {
+            var cutBg = GUI.backgroundColor;
+            if (streetscape.CutoutEnabled) GUI.backgroundColor = Color.cyan;
+
+            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 3.6f, w * 0.22f, btnH),
+                           streetscape.CutoutEnabled ? "cut ON" : "cut", _button))
+                streetscape.CutoutEnabled = !streetscape.CutoutEnabled;
+
+            GUI.backgroundColor = cutBg;
+        }
+
+        // --- reload site config, so a pushed buildings.json needs no rebuild ---
+        if (geospatial != null &&
+            GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 2.4f, w * 0.22f, btnH),
+                       "reload", _button))
+            geospatial.ReloadSite();
+
         // --- capture: screenshot + full state dump, for diagnosing this away from the site ---
         if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 6f, w * 0.22f, btnH),
                        "capture", _button))
@@ -274,7 +314,9 @@ public class DebugHud : MonoBehaviour
     /// </summary>
     void DrawAdjustControls(float w, float pad, float btnH)
     {
-        var parameters = (AlignmentNudge.Param[])Enum.GetValues(typeof(AlignmentNudge.Param));
+        // Not Enum.GetValues: the row is 5 buttons with the aspect lock on and 6 with it off,
+        // and the nudge owns which.
+        var parameters = nudge.ActiveParams;
 
         float rowY = Screen.height - pad - btnH * 4.6f;
         float cellW = (w - pad * 2f - pad * 0.4f * (parameters.Length - 1)) / parameters.Length;
@@ -287,7 +329,7 @@ public class DebugHud : MonoBehaviour
             if (active) GUI.backgroundColor = Color.cyan;
 
             if (GUI.Button(new Rect(pad + i * (cellW + pad * 0.4f), rowY, cellW, btnH),
-                           AlignmentNudge.Label(parameters[i]), _button))
+                           nudge.LabelOf(parameters[i]), _button))
                 nudge.Selected = parameters[i];
 
             GUI.backgroundColor = prevBg;
@@ -300,8 +342,20 @@ public class DebugHud : MonoBehaviour
         float value = nudge.GetValue(selected);
         float sliderY = rowY + btnH * 1.5f;
 
-        GUI.Label(new Rect(pad, sliderY - btnH * 0.9f, w * 0.6f, btnH),
-                  $"{AlignmentNudge.Label(selected)}: {nudge.ValueText(selected)}", _label);
+        GUI.Label(new Rect(pad, sliderY - btnH * 0.9f, w * 0.58f, btnH),
+                  $"{nudge.LabelOf(selected)}: {nudge.ValueText(selected)}", _label);
+
+        // Aspect lock rides on the value-label row — the only free width left down here, and it
+        // belongs next to the scale it governs rather than in the right-hand column.
+        bool locked = nudge.Current.keepAspect;
+        var prevAspectBg = GUI.backgroundColor;
+        if (!locked) GUI.backgroundColor = Color.yellow;
+
+        if (GUI.Button(new Rect(w * 0.6f, sliderY - btnH * 0.95f, w * 0.4f - pad, btnH * 0.9f),
+                       locked ? "aspect LOCK" : "aspect FREE", _button))
+            nudge.SetKeepAspect(!locked);
+
+        GUI.backgroundColor = prevAspectBg;
 
         float t = logarithmic
             ? Mathf.InverseLerp(Mathf.Log(min), Mathf.Log(max), Mathf.Log(Mathf.Max(min, value)))

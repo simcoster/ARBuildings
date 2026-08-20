@@ -1,10 +1,9 @@
 {
   "_comment": [
     "Authoritative site data, read at startup by SiteCatalog and applied OVER the inspector.",
-    "The only inspector field that selects a site is GeospatialController.siteId.",
-    "Coordinates to 6+ decimal places, from Google Earth Pro or a survey, not a phone GPS.",
-    "adjustments.json on the device is a per-user refinement on top of this baseline, and a",
-    "save made on site can overwrite these coordinates for that siteId until 'clear saved'."
+    "The device copy at persistentDataPath/buildings.json WINS over this one when present,",
+    "so coordinates can be corrected with `adb push` + the HUD reload button, no rebuild.",
+    "The only inspector field that selects a site is GeospatialController.siteId."
   ],
   "buildings": [
     {
@@ -12,22 +11,37 @@
       "name": "Synagogue",
       "model": "synagogue.glb",
       "footprint": {
-        "cornerA": { "latitude": 32.0835306, "longitude": 34.8150972 },
-        "cornerB": { "latitude": 32.0832389, "longitude": 34.8153667 }
+        "cornerA": {
+          "latitude": 32.0835833,
+          "longitude": 34.8151917
+        },
+        "cornerB": {
+          "latitude": 32.0835583,
+          "longitude": 34.8153667
+        }
       },
       "sizeMode": "FootprintWidth",
       "footprintAxis": "Z",
       "altitudeAboveTerrain": 0.0,
-      "headingOffsetFromABDeg": 180.0,
-      "headingDeg": 321.95,
+      "headingOffsetFromABDeg": -90.0,
+      "headingDeg": 9.57,
       "modelFrontOffsetDeg": 0.0,
       "_notes": [
-        "cornerA is on the FACADE, cornerB is the BACK corner (as pinned in Google Earth),",
-        "so the pair runs front-to-back: 41.19 m apart on bearing 141.95 deg true.",
-        "Heading therefore = 141.95 + 180 = 321.95, the facade looking north-west, and the",
-        "scale fits the model's DEPTH (BuildingLoader footprintAxis = Z) to 41.19 m.",
-        "headingDeg here is a record of what the corners derive, not an input."
-      ]
+        "BOTH corners are on the FRONT FACADE (2026-08-19 survey), 16.72 m apart on bearing",
+        "99.57 deg true, so the facade normal is 99.57 - 90 = 9.57, facing north. The viewer",
+        "stood 33 m away at bearing 325 from corner A, on the north side, confirming the sign.",
+        "The anchor is the MIDPOINT of the two corners, because BuildingLoader centres the model",
+        "across the facade.",
+        "SHAPE: a square main block with a NARROWER rectangle in front (entrance + stairs). The",
+        "pins span that front rectangle (~17.8 m), NOT the building's widest part, so the model's",
+        "X must not be fitted to them. Fitting DEPTH instead: fitMetres 33.4 on axis Z gives",
+        "x1.87, i.e. 24.7 m across the block, 15.9 m tall - matching the 0.75 width:depth ratio",
+        "of both the model box and the real building.",
+        "SUPERSEDES the original pair (facade point + BACK corner). That was a DIAGONAL; using it",
+        "as a depth inflated the model and put the heading 45 deg out, which is exactly the -43 to",
+        "-49 deg correction dialled in by hand on three separate visits."
+      ],
+      "fitMetres": 33.4
     }
   ]
 }

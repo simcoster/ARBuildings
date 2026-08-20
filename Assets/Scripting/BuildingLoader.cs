@@ -68,6 +68,10 @@ public class BuildingLoader : MonoBehaviour
              "automatically if left empty.")]
     [SerializeField] BuildingPlacement placement;
 
+    [Tooltip("Metres to fit the chosen axis to. 0 = use the distance between the footprint " +
+             "corners. Set from buildings.json.")]
+    [SerializeField] float fitMetres;
+
     [Tooltip("Move the model so it sits ON the anchor, base at ground level. CAD exports " +
              "routinely put the origin hundreds of metres from the geometry, and then the " +
              "building is placed correctly but drawn off in a field somewhere. Turn off only " +
@@ -137,6 +141,8 @@ public class BuildingLoader : MonoBehaviour
         if (!string.IsNullOrEmpty(site.sizeMode) &&
             Enum.TryParse(site.sizeMode, true, out SizeMode parsedMode))
             sizeMode = parsedMode;
+
+        fitMetres = site.fitMetres;
 
         if (!string.IsNullOrEmpty(site.footprintAxis))
             footprintAxis = site.footprintAxis.Trim().ToUpperInvariant() == "X" ? Axis.X : Axis.Z;
@@ -338,7 +344,11 @@ public class BuildingLoader : MonoBehaviour
         {
             if (placement == null) placement = FindAnyObjectByType<BuildingPlacement>();
 
-            double facade = placement != null ? placement.FootprintLengthMetres : 0.0;
+            // An explicit target wins: the pinned distance and the dimension worth fitting
+            // are not always the same measurement.
+            double facade = fitMetres > 0.01f
+                ? fitMetres
+                : (placement != null ? placement.FootprintLengthMetres : 0.0);
             float width = footprintAxis == Axis.X ? local.size.x : local.size.z;
 
             if (facade <= 0.01)

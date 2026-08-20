@@ -17,8 +17,13 @@ using UnityEngine;
 /// </summary>
 public class AlignmentNudge : MonoBehaviour
 {
-    /// <summary>Which value the single slider is currently editing.</summary>
-    public enum Param { Rotate, Scale, East, North, Height }
+    /// <summary>
+    /// Which value the single slider is currently editing. <see cref="Param.Scale"/> drives X
+    /// and Z together — a building's plan is fixed, so its footprint scales as one thing —
+    /// while <see cref="Param.ScaleV"/> drives height alone and only appears once the aspect
+    /// lock is off.
+    /// </summary>
+    public enum Param { Rotate, Scale, ScaleV, East, North, Height }
 
     /// <summary>One site's saved adjustment. Serialised straight to JSON.</summary>
     [Serializable]
@@ -26,7 +31,23 @@ public class AlignmentNudge : MonoBehaviour
     {
         public string siteId = "";
         public float headingDeg;
+
+        /// <summary>Horizontal scale — X and Z. Also the uniform scale while the lock is on.</summary>
         public float scale = 1f;
+
+        /// <summary>
+        /// Vertical scale, used only when <see cref="keepAspect"/> is false. Held equal to
+        /// <see cref="scale"/> while the lock is on, so unlocking never makes the model jump.
+        /// </summary>
+        public float scaleVertical = 1f;
+
+        /// <summary>
+        /// One scale for everything. Off when the model's proportions genuinely disagree with
+        /// the building's, which no uniform scale can fix — fitting the width then leaves the
+        /// height wrong and vice versa.
+        /// </summary>
+        public bool keepAspect = true;
+
         public float eastMetres;
         public float northMetres;
         public float heightMetres;
@@ -69,7 +90,10 @@ public class AlignmentNudge : MonoBehaviour
     string FilePath => Path.Combine(Application.persistentDataPath, fileName);
 
     public string DebugReadout =>
-        $"rot {Current.headingDeg:+0.0;-0.0}°  scale {Current.scale:F2}x\n" +
+        $"rot {Current.headingDeg:+0.0;-0.0}°  " +
+        (Current.keepAspect
+            ? $"scale {Current.scale:F2}x"
+            : $"wide {Current.scale:F2}x tall {Current.scaleVertical:F2}x") + "\n" +
         $"E {Current.eastMetres:+0.0;-0.0}  N {Current.northMetres:+0.0;-0.0}  " +
         $"up {Current.heightMetres:+0.0;-0.0} m{(Dirty ? "  *unsaved*" : "")}";
 
@@ -77,7 +101,8 @@ public class AlignmentNudge : MonoBehaviour
     public string StateReport =>
         $"adjust site        : {_siteId}\n" +
         $"adjust rot         : {Current.headingDeg:F2} deg\n" +
-        $"adjust scale       : {Current.scale:F3}x\n" +
+        $"adjust scale       : {Current.scale:F3}x wide / {Current.scaleVertical:F3}x tall " +
+        $"(aspect {(Current.keepAspect ? "LOCKED" : "SPLIT")})\n" +
         $"adjust E / N / up  : {Current.eastMetres:F2} / {Current.northMetres:F2} / " +
         $"{Current.heightMetres:F2} m\n" +
         $"baked coordinates  : {(Current.hasCoordinates ? $"{Current.latitude:F7}, {Current.longitude:F7}" : "none")}\n" +
@@ -93,14 +118,62 @@ public class AlignmentNudge : MonoBehaviour
     /// </summary>
     public void Bind(Transform root, string siteId)
     {
+        // BuildHierarchy re-binds on every re-localization, and reloading unconditionally
+        // threw away whatever you were in the middle of dialling in — silently, mid-session,
+        // on a site where re-localization is routine. Unsaved edits for the SAME site now
+        // survive the rebind; a different site still loads its own values.
+        bool keepLiveEdits = Dirty && _root != null && siteId == _siteId;
+
         _root = root;
         _siteId = siteId;
-        Current = Load(siteId);
-        Dirty = false;
+
+        if (!keepLiveEdits)
+        {
+            Current = Load(siteId);
+            Dirty = false;
+        }
+        else
+        {
+            Debug.Log($"[Adjust] re-bound '{siteId}' keeping unsaved edits " +
+                      $"(E {Current.eastMetres:F2}, N {Current.northMetres:F2}, " +
+                      $"scale {Current.scale:F3})");
+        }
+
         Apply();
     }
 
     // ------------------------------------------------------------------- values
+
+    static readonly Param[] LockedParams =
+        { Param.Rotate, Param.Scale, Param.East, Param.North, Param.Height };
+
+    static readonly Param[] SplitParams =
+        { Param.Rotate, Param.Scale, Param.ScaleV, Param.East, Param.North, Param.Height };
+
+    /// <summary>
+    /// The selector buttons to show. ScaleV is hidden while the lock is on rather than shown
+    /// disabled — a control that cannot do anything is worse than no control on a phone screen
+    /// this crowded.
+    /// </summary>
+    public Param[] ActiveParams => Current.keepAspect ? LockedParams : SplitParams;
+
+    /// <summary>One scale for all three axes, or height free of the footprint.</summary>
+    public void SetKeepAspect(bool on)
+    {
+        if (Current.keepAspect == on) return;
+
+        Current.keepAspect = on;
+
+        // Locking collapses to the horizontal scale; unlocking starts from it. Either way the
+        // model does not move at the moment you press the button, which matters when you are
+        // toggling it to compare two fits.
+        Current.scaleVertical = Current.scale;
+
+        if (on && Selected == Param.ScaleV) Selected = Param.Scale;
+
+        Dirty = true;
+        Apply();
+    }
 
     public float GetValue(Param p)
     {
@@ -108,6 +181,7 @@ public class AlignmentNudge : MonoBehaviour
         {
             case Param.Rotate: return Current.headingDeg;
             case Param.Scale:  return Current.scale;
+            case Param.ScaleV: return Current.scaleVertical;
             case Param.East:   return Current.eastMetres;
             case Param.North:  return Current.northMetres;
             default:           return Current.heightMetres;
@@ -119,7 +193,14 @@ public class AlignmentNudge : MonoBehaviour
         switch (p)
         {
             case Param.Rotate: Current.headingDeg = value; break;
-            case Param.Scale:  Current.scale = Mathf.Clamp(value, 0.1f, 50f); break;
+
+            case Param.Scale:
+                Current.scale = Mathf.Clamp(value, 0.1f, 50f);
+                // Kept in step while locked so unlocking is always a no-op visually.
+                if (Current.keepAspect) Current.scaleVertical = Current.scale;
+                break;
+
+            case Param.ScaleV: Current.scaleVertical = Mathf.Clamp(value, 0.1f, 50f); break;
             case Param.East:   Current.eastMetres = value; break;
             case Param.North:  Current.northMetres = value; break;
             default:           Current.heightMetres = value; break;
@@ -137,23 +218,32 @@ public class AlignmentNudge : MonoBehaviour
 
             // 0.1x to 50x is a 500-fold span. On a linear slider everything below 1x would
             // live in the first 2% of the travel, so this one is logarithmic.
-            case Param.Scale:  min = 0.1f;  max = 50f;  logarithmic = true;  break;
+            case Param.Scale:
+            case Param.ScaleV: min = 0.1f;  max = 50f;  logarithmic = true;  break;
 
             // Ground offsets reach much further than height ever needs to: VPS can be tens
             // of metres out, and you may want to walk the building down the street.
+            // 600 m of travel costs slider resolution — roughly 0.4 m per pixel at 1080p —
+            // so fine alignment is a matter of nudging, not dragging.
             case Param.East:
-            case Param.North:  min = -200f; max = 200f; logarithmic = false; break;
+            case Param.North:  min = -150; max = 150; logarithmic = true; break;
 
             default:           min = -50f;  max = 50f;  logarithmic = false; break;
         }
     }
 
-    public static string Label(Param p)
+    /// <summary>
+    /// Instance, not static: "scale" means the whole model while locked and the footprint only
+    /// while split, and a button that lies about which one it drives is how you end up
+    /// squashing a building without noticing.
+    /// </summary>
+    public string LabelOf(Param p)
     {
         switch (p)
         {
             case Param.Rotate: return "rot";
-            case Param.Scale:  return "scale";
+            case Param.Scale:  return Current.keepAspect ? "scale" : "wide";
+            case Param.ScaleV: return "tall";
             case Param.East:   return "X";
             case Param.North:  return "Y";
             default:           return "up";
@@ -166,7 +256,8 @@ public class AlignmentNudge : MonoBehaviour
         switch (p)
         {
             case Param.Rotate: return $"{v:+0.0;-0.0}°";
-            case Param.Scale:  return $"{v:F2}x";
+            case Param.Scale:
+            case Param.ScaleV: return $"{v:F2}x";
             default:           return $"{v:+0.00;-0.00} m";
         }
     }
@@ -193,7 +284,12 @@ public class AlignmentNudge : MonoBehaviour
             : world;
 
         _root.localRotation = Quaternion.Euler(0f, Current.headingDeg, 0f);
-        _root.localScale = Vector3.one * Mathf.Max(0.01f, Current.scale);
+
+        // X and Z share the horizontal scale: the footprint is one shape, and letting width
+        // and depth diverge would need a fourth control for a gain nothing has asked for yet.
+        float h = Mathf.Max(0.01f, Current.scale);
+        float v = Current.keepAspect ? h : Mathf.Max(0.01f, Current.scaleVertical);
+        _root.localScale = new Vector3(h, v, h);
     }
 
     public void ResetAll()
@@ -312,9 +408,16 @@ public class AlignmentNudge : MonoBehaviour
 
         if (entry == null) return new Adjustment { siteId = siteId };
 
+        // Files written before the split existed have no scaleVertical. JsonUtility leaves the
+        // field initializer in place for absent keys, so it reads back as 1x — which would
+        // squash a model saved at 0.67x the moment the lock came off.
+        if (entry.keepAspect || entry.scaleVertical <= 0.01f)
+            entry.scaleVertical = entry.scale;
+
         Debug.Log($"[Adjust] loaded '{siteId}': rot {entry.headingDeg:F1}, " +
-                  $"scale {entry.scale:F2}, E {entry.eastMetres:F1}, " +
-                  $"N {entry.northMetres:F1}, up {entry.heightMetres:F1}");
+                  $"scale {entry.scale:F2}/{entry.scaleVertical:F2} " +
+                  $"(aspect {(entry.keepAspect ? "locked" : "split")}), " +
+                  $"E {entry.eastMetres:F1}, N {entry.northMetres:F1}, up {entry.heightMetres:F1}");
         return entry;
     }
 

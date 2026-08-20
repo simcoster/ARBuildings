@@ -23,8 +23,37 @@ public class AdaptiveQuality : MonoBehaviour
     float _accum;
     int _samples;
     float _warmup;
+    int _startTier;
+    int _drops;
+    float _emaMs;
 
     public int CurrentTier => _tier;
+
+    /// <summary>
+    /// HUD line. Shows the tier as a letter, the smoothed frame time against the budget
+    /// that drives tiering, and the shadow distance the tier implies — Tier C drops it to
+    /// 60 m, so a building further away silently stops casting and the tier is the reason.
+    /// </summary>
+    public string DebugReadout
+    {
+        get
+        {
+            bool warming = _warmup < warmupSeconds;
+            string timing = warming
+                ? $"{_emaMs:F1} ms (warmup {warmupSeconds - _warmup:F0}s)"
+                : $"{_emaMs:F1} ms / {BudgetMs:F0} budget";
+
+            string history = _tier == _startTier
+                ? $"start {Letter(_startTier)} ({(startTier >= 0 ? "forced" : "auto")})"
+                : $"from {Letter(_startTier)}, dropped {_drops}x";
+            if (_tier >= LowestTier) history += ", at floor";
+
+            return $"quality: tier {Letter(_tier)}  {timing}\n" +
+                   $"  shadows {QualitySettings.shadowDistance:F0} m - {history}";
+        }
+    }
+
+    static char Letter(int tier) => (char)('A' + tier);
 
     void Start()
     {
@@ -32,6 +61,7 @@ public class AdaptiveQuality : MonoBehaviour
 
         _tier = startTier >= 0 ? startTier : GuessTier();
         _tier = Mathf.Clamp(_tier, 0, LowestTier);
+        _startTier = _tier;
         QualitySettings.SetQualityLevel(_tier, true);
     }
 
@@ -49,6 +79,11 @@ public class AdaptiveQuality : MonoBehaviour
 
     void Update()
     {
+        // Smoothed outside the warmup gate so the HUD shows a frame time from the first
+        // second, not a zero until warmup ends.
+        float ms = Time.unscaledDeltaTime * 1000f;
+        _emaMs = _emaMs <= 0f ? ms : Mathf.Lerp(_emaMs, ms, 0.05f);
+
         if (_warmup < warmupSeconds)
         {
             _warmup += Time.unscaledDeltaTime;
@@ -69,8 +104,9 @@ public class AdaptiveQuality : MonoBehaviour
         if (avgMs > BudgetMs && _tier < LowestTier)
         {
             _tier++;
+            _drops++;
             QualitySettings.SetQualityLevel(_tier, true);
-            Debug.Log($"Dropped to quality tier {_tier} (avg {avgMs:F1} ms)");
+            Debug.Log($"Dropped to quality tier {_tier} ({Letter(_tier)}) (avg {avgMs:F1} ms)");
         }
     }
 }

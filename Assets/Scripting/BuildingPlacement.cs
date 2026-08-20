@@ -107,8 +107,11 @@ public class BuildingPlacement : MonoBehaviour
     /// <summary>Where the anchor goes when footprint mode is on.</summary>
     public bool TryGetAnchorLatLng(out double latitude, out double longitude)
     {
-        latitude = cornerALatitude;
-        longitude = cornerALongitude;
+        // The MIDPOINT of the two corners, not corner A. BuildingLoader centres the model
+        // across the facade, so anchoring at one end left it half a facade width off — about
+        // 8 m here, and a large part of the "misplaced by 10-20 m" that kept coming back.
+        latitude = (cornerALatitude + cornerBLatitude) * 0.5;
+        longitude = (cornerALongitude + cornerBLongitude) * 0.5;
         return useFootprint;
     }
 

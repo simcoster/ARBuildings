@@ -179,6 +179,47 @@ public class GeospatialController : MonoBehaviour
         if (debugPlaceWithoutLocalization) PlaceWithoutLocalization();
     }
 
+    /// <summary>
+    /// Re-reads buildings.json and re-places from scratch. With the device copy taking
+    /// priority, this turns "the heading is wrong" into an adb push and a button press
+    /// instead of a rebuild and a second trip to the site.
+    /// </summary>
+    public void ReloadSite() => StartCoroutine(ReloadRoutine());
+
+    System.Collections.IEnumerator ReloadRoutine()
+    {
+        SiteCatalog.Site site = null;
+        yield return SiteCatalog.Load(siteId, loaded => site = loaded);
+
+        if (site != null)
+        {
+            if (placement != null) placement.ApplySite(site);
+            if (buildingLoader != null) buildingLoader.ApplySite(site);
+
+            if (!site.HasFootprint && System.Math.Abs(site.latitude) > 0.0001)
+            {
+                latitude = site.latitude;
+                longitude = site.longitude;
+            }
+
+            altitudeAboveTerrain = site.altitudeAboveTerrain;
+        }
+
+        bool wasPreview = _previewRoot != null;
+        TearDownHierarchy();
+
+        if (wasPreview)
+        {
+            EnterPreview();
+            yield break;
+        }
+
+        // Re-arm so the gate resolves a fresh anchor at whatever the file now says.
+        _placed = false;
+        CurrentPhase = Phase.WaitingForEarth;
+        DebugReadout = $"site reloaded from {SiteCatalog.LastSource} — re-placing";
+    }
+
     /// <summary>No ARCore, no VPS, no waiting — just build the hierarchy somewhere visible.</summary>
     void PlaceWithoutLocalization()
     {
@@ -483,8 +524,22 @@ public class GeospatialController : MonoBehaviour
         // The HUD says which happened — the failure to avoid is a silent one, not a partial.
         if (TryCaptureCoordinates(out double lat, out double lng))
         {
+            // Logged BEFORE the bake, because BakeCoordinates zeroes east/north. If the
+            // offsets below are non-zero but the baked coordinate comes back equal to the
+            // anchor's, the offset is being dropped rather than converted — which is the
+            // difference between "your correction was saved" and "your correction was
+            // silently discarded", and the two are indistinguishable in the saved file.
+            var nudgeT = _hierarchyRoot.transform;
+            var anchorT = nudgeT.parent;
+            Vector3 delta = anchorT != null ? nudgeT.position - anchorT.position : Vector3.zero;
+
+            Debug.Log($"[Geospatial] baking '{siteId}': " +
+                      $"offsets E {nudge.Current.eastMetres:F2} N {nudge.Current.northMetres:F2} " +
+                      $"up {nudge.Current.heightMetres:F2} | " +
+                      $"nudgeRoot-anchor delta ({delta.x:F2}, {delta.y:F2}, {delta.z:F2}) " +
+                      $"= {delta.magnitude:F2} m | baked {lat:F7}, {lng:F7}");
+
             nudge.BakeCoordinates(lat, lng);
-            Debug.Log($"[Geospatial] baked new coordinates {lat:F7}, {lng:F7} for '{siteId}'");
         }
         else
         {

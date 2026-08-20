@@ -36,6 +36,11 @@ Shader "AR/StreetscapeOccluderShadow"
         float4x4 _OccluderCutoutWorldToLocal;
         float    _OccluderCutoutOn;
 
+        // INVERTED on purpose: an unset global reads as 0, and 0 must mean "occluders behave
+        // normally". A positive flag would switch occlusion off by default anywhere the
+        // component driving it has not run.
+        float    _OccludersDisabled;
+
         // The matrix maps the box to a unit cube centred on the origin, so the test is a
         // simple bounds check and rotation comes along for free.
         bool InsideCutout(float3 positionWS)
@@ -76,6 +81,10 @@ Shader "AR/StreetscapeOccluderShadow"
 
             half4 frag(Varyings IN) : SV_Target
             {
+                // Master switch: with occlusion off, nothing real is allowed to hide the
+                // model. Shadows are untouched, because this pass only writes depth.
+                if (_OccludersDisabled > 0.5) discard;
+
                 // Inside the replacement building's volume the real geometry must not write
                 // depth, or it carves holes out of the model standing in the same place.
                 if (InsideCutout(IN.positionWS)) discard;
