@@ -291,6 +291,10 @@ MonoBehaviour:
   targetAnchor: {fileID: 0}
   visualiseMeshes: 0
   debugMaterial: {fileID: 2100000, guid: 7c3a9e51d284b64f8a0f2b7e35c19d06, type: 2}
+  cutoutEnabled: 1
+  occludersEnabled: 0
+  cutoutMargin: 1.08
+  cutoutPaddingMetres: 1.5
 --- !u!114 &379862633
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -930,6 +934,7 @@ GameObject:
   - component: {fileID: 1200000005}
   - component: {fileID: 1200000006}
   - component: {fileID: 1200000007}
+  - component: {fileID: 1200000008}
   m_Layer: 0
   m_Name: GeospatialController
   m_TagString: Untagged
@@ -1044,7 +1049,9 @@ MonoBehaviour:
   modelScale: 1
   footprintAxis: 0
   placement: {fileID: 0}
+  fitMetres: 0
   recenterOnAnchor: 1
+  anchorAlign: 1
 --- !u!114 &1200000007
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1060,6 +1067,27 @@ MonoBehaviour:
   geospatial: {fileID: 1200000003}
   nudge: {fileID: 1200000005}
   lighting: {fileID: 379862631}
+  loader: {fileID: 0}
+  streetscape: {fileID: 0}
+  quality: {fileID: 0}
+--- !u!114 &1200000008
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1200000001}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b2461790542a65a46965e5a6c9295c4c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::RemoteControl
+  pollIntervalSeconds: 0.25
+  stateIntervalSeconds: 1
+  logCommands: 1
+  geospatial: {fileID: 0}
+  nudge: {fileID: 0}
+  lighting: {fileID: 0}
   loader: {fileID: 0}
   streetscape: {fileID: 0}
 --- !u!1660057539 &9223372036854775807
