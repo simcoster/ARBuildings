@@ -98,7 +98,14 @@ public static class DebugCapture
 
         Section(text, "MODEL", loader != null ? loader.StateReport : "no loader");
         Section(text, "ADJUSTMENT", nudge != null ? nudge.StateReport : "no nudge");
-        Section(text, "OCCLUSION", streetscape != null ? streetscape.StateReport : "no streetscape");
+        // Looked up rather than passed in: there are two independent occluders and a capture
+        // that reports only the streetscape one is how the depth occluder stayed invisible
+        // through a whole site session. Found here so no caller can forget to pass it.
+        var depth = UnityEngine.Object.FindAnyObjectByType<DepthOcclusion>();
+
+        Section(text, "OCCLUSION",
+            (streetscape != null ? streetscape.StateReport : "no streetscape") +
+            (depth != null ? depth.StateReport : "depth switch absent"));
         Section(text, "LIGHTING", lighting != null ? lighting.StateReport : "no lighting");
 
         var camera = Camera.main;

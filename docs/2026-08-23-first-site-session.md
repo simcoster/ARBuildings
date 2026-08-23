@@ -108,7 +108,7 @@ around it with `sun on`. Not yet fixed properly.
 
 ## Still open
 
-### The model flickers in and out as the camera tilts
+### ~~The model flickers in and out as the camera tilts~~ — CLOSED the same evening
 
 Worse when the model sits high in frame; worse again when a table was visible at placement
 time. Reproduces **at the desk in preview**, so it does not need another site visit.
@@ -122,15 +122,66 @@ Ruled out by measurement, not argument:
 - **Not transparency** — a five-frame burst showed the model *entirely absent* in one frame
   and back in the next, not see-through.
 
-Leading suspect: the model hangs off an `ARAnchor`, and AR Foundation may deactivate a
-trackable when its tracking degrades — taking every child with it. Tilting up toward a
-featureless ceiling/window is exactly where tracking degrades. The table clue fits a variant:
-an anchor attached to a small, unstable table plane rather than the floor.
+Leading suspect at the time: the model hangs off an `ARAnchor`, and AR Foundation may
+deactivate a trackable when its tracking degrades — taking every child with it. Tilting up
+toward a featureless ceiling/window is exactly where tracking degrades. The table clue fits a
+variant: an anchor attached to a small, unstable table plane rather than the floor.
 
 `anchor trackable : <state>, active=<bool>, pending=<bool>` was added to the state dump and
-distinguishes them in one reading. **Needs one build to check.** Note this flicker is a
-regression introduced by fix #2 — before it, `PreviewRoot` was a plain Transform that could
-not be deactivated.
+distinguishes them in one reading.
+
+#### Answered — and FIXED — the same evening: it is DEPTH occlusion, and it was never the anchor
+
+**Confirmed on device at 20:02, build stamp `2026-08-23 19:58:05`: the flicker is gone.**
+
+The build that carried the `anchor trackable` diagnostic was already on the phone. It reads
+`Tracking, active=True, pending=False` — **the anchor is fine.** The real occluder was the one
+nobody had counted:
+
+- The scene carries an **`AROcclusionManager`**, enabled, `m_EnvironmentDepthMode: 1`
+  (Fastest), temporal smoothing on. `CLAUDE.md` said the Depth API was "deliberately
+  deferred". It was in the scene the whole time.
+- It needs **no shader of ours**. `ARCoreBackground.shader` draws the camera feed with
+  `ZWrite On` and writes `gl_FragDepth` from `_EnvironmentDepth`, so ARCore's depth map is in
+  the depth buffer before any scene geometry, and every opaque object is depth-tested against
+  it. Nothing opts in.
+- ARCore depth is useful ~0.5–5 m, valid to ~8 m. **The building is 28 m away.**
+- And on this device the depth pipeline is failing about **ten times a second**:
+  `spherical_rectifier.cc:159 RET_CHECK failure … Only kUnrectifiedOriginal is supported for
+  ComputeDisparity`, tag `native`, straight from the app's own pid.
+
+That is the only hypothesis consistent with every measurement above. `renderers drawing : 0 of
+40` counts *streetscape* renderers, and the camera background is not one — which is precisely
+why "occlusion is off" read true while occlusion was happening, for the **second** time this
+project (see wrong theory 2, which was about the other switch).
+
+**The lesson worth keeping:** an "occlusion off" reading is only as broad as the list of
+occluders you know about. Twice now that list has been short by one.
+
+Fixed by `DepthOcclusion`, off by default, `depth on|off` over `RemoteControl`, reporting
+`depth manager` / `depth requested` / `depth current` / `depth texture` into the state dump.
+The lever is `AROcclusionManager.enabled` rather than the depth mode, because the background
+material's depth keyword is only ever pushed on a frame event — stop the frames and the
+keyword stays stuck on, while disabling the manager makes the package fire one last event that
+clears it. Kept as a toggle because on iPad LiDAR it is worth turning **on**.
+
+Measured across the two builds:
+
+| | old build (depth on) | new build (depth off) |
+|---|---|---|
+| `depth current` | Fastest | **Disabled**, preference NoOcclusion |
+| `depth texture` | present | **none** |
+| motion-stereo `RET_CHECK` errors | 82 in ~12 s (**~10/s**) | 9 in 49 s (**~0.2/s**) |
+| flicker | yes | **no** |
+
+`depth current` is the line to read, not `depth requested` — it is the subsystem agreeing
+rather than a request having been made.
+
+One detail worth keeping: the depth errors did **not** stop, they dropped ~50×. Something else
+in ARCore still pokes the pipeline occasionally, most likely Streetscape Geometry. That
+sharpens the diagnosis rather than weakening it — the flicker stopped while those errors
+continued, so the fault was never the errors themselves, it was the depth **texture** reaching
+the depth buffer through the camera background pass.
 
 ### Other open items
 
@@ -220,3 +271,32 @@ Batchmode is also faster than the Editor's Build & Run, which pays a cold shader
 Adjustments reset to zero, nothing saved, occluders off, cutout off, `sun on`. The device
 `buildings.json` was restored to the repo copy (`modelFrontOffsetDeg: 0`). 22 capture files
 (11 matched PNG + state pairs) were pulled to the laptop before leaving.
+
+---
+
+## Evening follow-up — state at 20:08, and what to do first next time
+
+Build stamp on the phone: **`2026-08-23 19:58:05`**, carrying the depth switch. Verified from
+`state.txt`: `depth occlusion : OFF`, `depth manager : enabled=False`, `depth current :
+Disabled, preference NoOcclusion`, `depth texture : none`, `occluders enabled : False`,
+`anchor trackable : Tracking, active=True, pending=False`. Flicker gone.
+
+**Do these two before trusting any placement reading:**
+
+1. **`reset`.** The device's `adjustments.json` still carries `scale 0.670` — the
+   pre-`fitMetres` value. It has now silently shrunk the model to 67% across two sessions.
+2. **Read `depth current`, not `depth requested`.** The first is the subsystem agreeing; the
+   second is only what was asked for. Same distinction as `cfg:device` vs `cfg:apk`.
+
+Still open, unchanged by this evening: the occluder cutout clipping the model, whether
+`modelFrontOffsetDeg` needs 180 now that the extrusion side is fixed, the missing shadow, and
+uncalibrated exposure.
+
+Left uncommitted on `geospatial-bringup`: `Assets/Scripting/DepthOcclusion.cs` (new), the
+`depth` command in `RemoteControl`, the depth section in `DebugCapture`, and these docs.
+Unity's own build also touched `ProjectSettings/ProjectSettings.asset`,
+`ProjectSettings/EditorBuildSettings.asset` and `Assets/Plugins/Android/proguard-user.txt` —
+those are the Editor's, not this work's.
+
+The **iPad / Unity Build Automation** target was scoped but not started; the four blockers and
+the reasoning for turning `depth` **on** there are in `CLAUDE.md` under Open.

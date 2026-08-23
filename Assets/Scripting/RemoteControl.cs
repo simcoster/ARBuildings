@@ -24,6 +24,7 @@ using UnityEngine;
 ///     scale 1.02      east -0.4      north +0.2      up 0      scalev 1.0
 ///     save            reset          clear           reload
 ///     preview on      occlude off    cut on          mesh off    sun on   aspect on
+///     depth off       real-world DEPTH occlusion — a different occluder from `occlude`
 ///     recenter        capture        state
 ///
 /// Every run also drops <see cref="StateFileName"/> next to it, so the current numbers can be
@@ -52,6 +53,7 @@ public class RemoteControl : MonoBehaviour
     [SerializeField] LightingController lighting;
     [SerializeField] BuildingLoader loader;
     [SerializeField] StreetscapeShadowSetup streetscape;
+    [SerializeField] DepthOcclusion depth;
 
     float _pollTimer;
     float _stateTimer;
@@ -68,6 +70,13 @@ public class RemoteControl : MonoBehaviour
         if (lighting == null) lighting = FindAnyObjectByType<LightingController>();
         if (loader == null) loader = FindAnyObjectByType<BuildingLoader>();
         if (streetscape == null) streetscape = FindAnyObjectByType<StreetscapeShadowSetup>();
+
+        // Added in code rather than to the scene deliberately: the scene is the one thing that
+        // cannot be edited while the Editor holds it, and this switch had to exist on the
+        // phone the same day. It carries its own defaults, so nothing is lost by not being
+        // serialized in the scene.
+        if (depth == null) depth = FindAnyObjectByType<DepthOcclusion>();
+        if (depth == null) depth = gameObject.AddComponent<DepthOcclusion>();
 
         Debug.Log($"[Remote] listening on {CommandPath}");
     }
@@ -211,6 +220,13 @@ public class RemoteControl : MonoBehaviour
                 streetscape.OccludersEnabled = OnOff(arg);
                 return $"occluders {(streetscape.OccludersEnabled ? "on" : "off")}";
 
+            // The OTHER occluder: ARCore's depth map, written into the depth buffer by the
+            // camera background pass. `occlude` does not touch it and never did.
+            case "depth":
+                if (depth == null) return "no depth switch";
+                depth.Enabled = OnOff(arg);
+                return $"depth occlusion {(depth.Enabled ? "on" : "off")}";
+
             case "cut":
                 if (streetscape == null) return "no streetscape";
                 streetscape.CutoutEnabled = OnOff(arg);
@@ -313,6 +329,7 @@ public class RemoteControl : MonoBehaviour
         if (loader != null) report.AppendLine(loader.StateReport);
         if (lighting != null) report.AppendLine(lighting.StateReport);
         if (streetscape != null) report.AppendLine(streetscape.StateReport);
+        if (depth != null) report.AppendLine(depth.StateReport);
 
         return report.ToString();
     }

@@ -114,6 +114,7 @@ should not require knowing the current value first.
 | `reload` | re-read `buildings.json` — pair it with pushing a new one |
 | `preview on\|off` `occlude on\|off` `cut on\|off` `mesh on\|off` `sun on\|off` `aspect on\|off` | the HUD toggles |
 | `capture` `recenter` `state` | screenshot + dump, recentre preview, force a state write |
+| `depth on\|off` | real-world DEPTH occlusion (ARCore/LiDAR). **A different occluder from `occlude`** — see below. Off by default |
 | `catcher on\|off` | diagnostic: paint the shadow catcher by its shadow term — green lit, red shadowed |
 
 **`preview on` over the remote does NOT turn forced daylight on**, though the HUD's preview
@@ -237,6 +238,12 @@ adb pull /sdcard/Android/data/com.pavel.arbuildings/files/captures/
 
 ## Occlusion — currently OFF by default
 
+**There are TWO independent occluders, and for a whole site session only one of them was
+known about.** `occlude` controls streetscape geometry. `depth` controls ARCore's depth map,
+which reaches the depth buffer without any of our code or shaders being involved — see
+[Depth occlusion](#depth-occlusion--the-second-invisible-occluder). Every "occlusion is off"
+measurement taken before 2026-08-23 evening only ever measured the first one.
+
 `occludersEnabled` defaults to **false**. With it off nothing real can hide the model, which
 separates "the model is in the wrong place" from "the model is behind something" — the single
 most useful diagnostic on site. **Shadows are unaffected**: the master switch only kills the
@@ -268,6 +275,59 @@ the target — which does not exist here. `pick`/tap-to-select was removed along
 raycast machinery; it is in git history if another site ever needs it.
 
 `StreetscapeShadowSetup` disables itself in the Editor, so all of this is device-only.
+
+### Depth occlusion — the second, invisible occluder
+
+The scene has always carried an **`AROcclusionManager`** with `m_EnvironmentDepthMode: 1`
+(Fastest) and temporal smoothing on. Nothing in this project asked for it, no custom shader
+samples it, and that is exactly why it was never suspected — **it does not need a shader of
+ours to work.** `ARCoreBackground.shader` draws the camera feed with `ZWrite On` and writes
+`gl_FragDepth` from `_EnvironmentDepth`, so ARCore's depth map is in the depth buffer before
+any scene geometry is drawn, and **every opaque object is depth-tested against it**. Nothing
+opts in; nothing can opt out except the switch.
+
+Two reasons it is wrong on Android here:
+
+- ARCore depth is useful ~0.5–5 m and valid to ~8 m. **The building is 28 m away.** No reading
+  at that range can decide what is in front of what.
+- On the A35 the depth pipeline **fails about ten times a second**, and has all along:
+  `spherical_rectifier.cc:159 RET_CHECK failure … Only kUnrectifiedOriginal is supported for
+  ComputeDisparity`, under tag `native`. Motion stereo errors per frame while its output is
+  still written into the depth buffer per frame.
+
+This was the cause of **the flicker** recorded on 2026-08-23, and switching it off **fixed it
+— confirmed on device the same evening**. It is the only explanation that survives that day's
+measurements: `renderers drawing : 0 of 40` counts *streetscape* renderers and the camera
+background is not one; the culling bounds were right because culling was never involved; the
+anchor read `Tracking, active=True` because the anchor was fine.
+
+The depth errors dropped ~50× but did not stop, so something else in ARCore still requests
+depth occasionally — most likely Streetscape Geometry. The flicker stopped anyway, which
+localises the fault precisely: not the errors, but the depth **texture** reaching the depth
+buffer through the background pass.
+
+`DepthOcclusion` is the switch — **off by default**, `depth on|off` over `RemoteControl`, and
+it reports `depth manager` / `depth requested` / `depth current` / `depth texture` into the
+state dump so "the switch is off" can be told from "the switch did not take".
+
+**The lever is `AROcclusionManager.enabled`, and which lever you pick matters.** The
+background material's `ARCORE_ENVIRONMENT_DEPTH_ENABLED` keyword is only ever pushed by
+`ARCameraBackground.OnOcclusionFrameReceived` — on a *frame event*. So anything that merely
+stops depth frames arriving (requesting `EnvironmentDepthMode.Disabled` on its own) leaves the
+keyword stuck **on** with a stale texture instead of turning it off. Disabling the manager is
+the path the package explicitly supports: `AROcclusionManager.OnDisable` stops the subsystem,
+destroys the textures and then deliberately fires one last frame event — its own comment says
+*"because ARCameraBackground needs it to set the shader keywords"* — and with the subsystem
+stopped that event carries the keyword in the **disabled** list.
+
+So the order is: preference and depth mode first (while the manager is still enabled, so the
+setters can reach the subsystem and ARCore stops computing depth), `enabled = false` last. A
+watchdog re-applies once a second, because those setters are a **no-op until the subsystem
+exists** — and it does not exist at `Start`.
+
+Kept as a toggle rather than deleted because on an **iPad it is worth turning ON**: LiDAR
+gives real depth at real range, and this is the only mechanism that can put people and cars in
+front of the model.
 
 ### Confirmed: Google has no building geometry at this site
 
@@ -492,6 +552,25 @@ adb, no hands on the device. Screenshots via `adb exec-out screencap`, state via
 `adb pull state.txt`, adjustments via `adb push command.txt`. Bring the phone up, confirm
 `[Remote] listening on …` in logcat, then work in nudges.
 
+### Where the last session left off — 2026-08-23 evening
+
+The **flicker is fixed** (build stamp `2026-08-23 19:58:05`): it was ARCore's depth map being
+written into the depth buffer by the camera background pass, and `depth off` is now the
+default. Full account in `docs/2026-08-23-first-site-session.md`; mechanism in
+[Depth occlusion](#depth-occlusion--the-second-invisible-occluder). The anchor-deactivation
+theory is dead — `anchor trackable` reads `Tracking, active=True` throughout.
+
+Two things to do **before** trusting any placement reading next time:
+
+1. **`reset` the adjustments.** The device's `adjustments.json` still carries `scale 0.670`,
+   the pre-`fitMetres` value, which silently shrinks the corrected model to 67%. It has now
+   fooled two sessions.
+2. **Check `depth current : Disabled`** in the state dump, not `depth requested` — the first
+   is the subsystem agreeing, the second is only what was asked for.
+
+Uncommitted at the end of the session: `DepthOcclusion.cs`, the `depth` command in
+`RemoteControl`, the depth section in `DebugCapture`, and these docs.
+
 Open:
 - **Verify the placement prediction on the phone.** The arithmetic half is settled
   (×1.8701 → 24.66 × 15.91 × 33.40 m, front face at 9.57° true, anchored at the facade
@@ -524,12 +603,35 @@ Open:
   real reference object photographed on the carpet showed **no directional cast shadow at all** —
   just soft contact darkening — because a window is a broad source. Matching this room argues
   for a subtle contact term, not a crisp cast shadow.
-- `AROcclusionManager` / Depth API would occlude cars and people, which streetscape never can.
-  Deliberately deferred — every custom shader would need to sample the depth texture.
+- ~~`AROcclusionManager` / Depth API deliberately deferred~~ — **this note was wrong and cost a
+  site session.** The manager was in the scene and enabled the whole time, and it needs no
+  shader of ours: the camera background pass writes ARCore's depth into the depth buffer and
+  every opaque object is tested against it. Now switched **off** by default and exposed as
+  `depth on|off`. See [Depth occlusion](#depth-occlusion--the-second-invisible-occluder).
+  Turning it **on** is the right call on LiDAR hardware.
 - ~~Geospatial Creator / 3D tiles in the Editor~~ — **closed, do not reopen.** Built, measured,
   removed; Google has no reconstruction of this building and ARCore's Geospatial Creator cannot
   work on Unity 6.5 at all. See the simulator postmortem above.
-- iOS is plausible (ARKit installed, iOS support and API key already set) but needs a Mac or
-  cloud CI, the empty `locationUsageDescription` filled in, and the geometry-shader fix.
+- **The iPad target (Unity Build Automation), scoped 2026-08-23 but not started.** The iPad
+  has **LiDAR and no GPS**, which flips two decisions:
+  - **Turn `depth` ON there.** LiDAR gives real depth at real range, and it is the only
+    mechanism that can put people and cars in front of the model — something streetscape
+    geometry can never do. This is why the depth switch is a toggle and not a deletion.
+  - **No GPS means no Geospatial.** VPS needs a coarse location prior and a Wi-Fi-only iPad
+    has none outdoors. The iPad build is a **preview / manual-placement** app — which already
+    works. Consider dropping ARCore Extensions from the iOS target entirely: it removes the
+    CocoaPods / ARCore-iOS-SDK complications from cloud CI in one move.
+
+  Four concrete blockers, all verified in the repo:
+  1. `locationUsageDescription` is **empty** (`ProjectSettings/ProjectSettings.asset:584`) —
+     a crash or a store rejection the moment anything asks for location.
+  2. `GhostWireframe.shader` uses `#pragma geometry` and **Metal has no geometry stage**.
+     Ghosting is already dead at this site, so excluding it from the iOS target is the cheap
+     fix.
+  3. `appleEnableAutomaticSigning: 0`, so Build Automation needs a provisioning profile and
+     `.p12` uploaded.
+  4. Already fine: `targetDevice: 2` (iPhone + iPad), iOS 15.0, `com.unity.xr.arkit` 6.5.0
+     installed, and `ProjectSettings/ARCoreExtensionsProjectSettings.json` has
+     `IsIOSSupportEnabled: true` with an iOS API key — relevant only if Extensions is kept.
 - Ghosting is **dead at this site** — Google's reconstruction has no building geometry here
   (see the section above). Only matters if the app is ever pointed at another address.
