@@ -357,17 +357,15 @@ public class DebugHud : MonoBehaviour
 
         GUI.backgroundColor = prevAspectBg;
 
-        float t = logarithmic
-            ? Mathf.InverseLerp(Mathf.Log(min), Mathf.Log(max), Mathf.Log(Mathf.Max(min, value)))
-            : Mathf.InverseLerp(min, max, value);
+        float t = AlignmentNudge.ToSlider(value, min, max, logarithmic);
 
         float newT = GUI.HorizontalSlider(new Rect(pad, sliderY, w - pad * 2f, btnH), t, 0f, 1f,
                                           _sliderTrack, _sliderThumb);
 
-        if (!Mathf.Approximately(newT, t))
-            nudge.SetValue(selected, logarithmic
-                ? Mathf.Exp(Mathf.Lerp(Mathf.Log(min), Mathf.Log(max), newT))
-                : Mathf.Lerp(min, max, newT));
+        // Guard the NaN case explicitly rather than relying on Approximately, which returns
+        // false for NaN and so treats a broken mapping as "the user moved the slider".
+        if (!float.IsNaN(newT) && !Mathf.Approximately(newT, t))
+            nudge.SetValue(selected, AlignmentNudge.FromSlider(newT, min, max, logarithmic));
 
         // --- save / reset / clear ---
         float actionY = Screen.height - pad - btnH;

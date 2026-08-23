@@ -33,6 +33,18 @@ public class LightingController : MonoBehaviour
     [SerializeField] float forcedSunAzimuth = 135f;
     [SerializeField] float forcedSunIntensity = 1.4f;
 
+    [Tooltip("While forced daylight is on, point the sun where ARCore says the light " +
+             "actually comes from, instead of the fixed azimuth above.\n\n" +
+             "Forced daylight exists for previewing INDOORS, which is precisely where the " +
+             "solar position is meaningless and the room's own lighting is the thing the " +
+             "shadow has to agree with — a ceiling lamp overhead and a 45 deg sun from the " +
+             "south-east put the shadow in visibly different places. Colour and intensity " +
+             "still come from forced daylight, or a dim room would undo it.")]
+    [SerializeField] bool matchEstimatedLight = true;
+
+    [Tooltip("Estimated direction is per-frame and jitters. Lower = steadier shadow.")]
+    [SerializeField] float estimatedLightSmoothing = 3f;
+
     [Header("North alignment")]
     [Tooltip("Optional. Found automatically. Needed to know which way Unity's +Z actually " +
              "points, without which the sun — and every shadow — is aimed arbitrarily.")]
@@ -193,6 +205,7 @@ public class LightingController : MonoBehaviour
         $"forced daylight    : {forceDaylight}\n" +
         $"sun light          : {(sunLight != null ? $"enabled={sunLight.enabled} intensity={sunLight.intensity:F2} colour={sunLight.color}" : "none")}\n" +
         $"sun world forward  : {(sunLight != null ? sunLight.transform.forward.ToString() : "n/a")}\n" +
+        $"sun direction from : {(forceDaylight ? (matchEstimatedLight && EstimatedLightTravel.HasValue ? "ROOM LIGHT (ARCore estimate)" : $"forced az/el {forcedSunAzimuth:F0}/{forcedSunElevation:F0}") : "computed solar position")}\n" +
         $"estimation mode    : {(cameraManager != null ? cameraManager.currentLightEstimation.ToString() : "no camera manager")}\n" +
         $"estimated dir      : {(EstimatedLightTravel.HasValue ? EstimatedLightTravel.Value.ToString() : "none")}\n" +
         $"estimated lumens   : {EstimatedLumens:F0}\n" +
@@ -373,6 +386,24 @@ public class LightingController : MonoBehaviour
         if (le.mainLightDirection.HasValue) EstimatedLightTravel = le.mainLightDirection.Value;
         if (le.mainLightIntensityLumens.HasValue) EstimatedLumens = le.mainLightIntensityLumens.Value;
         if (le.mainLightColor.HasValue) EstimatedColour = le.mainLightColor.Value;
+
+        // Indoors, the estimate is the only thing that knows where the light IS. Applied
+        // only under forced daylight: outdoors the computed solar position is far steadier
+        // than a single frame, which is why the estimate is otherwise recorded and ignored.
+        if (sunLight != null && forceDaylight && matchEstimatedLight &&
+            EstimatedLightTravel.HasValue &&
+            EstimatedLightTravel.Value.sqrMagnitude > 1e-4f)
+        {
+            var target = Quaternion.LookRotation(EstimatedLightTravel.Value.normalized);
+
+            sunLight.transform.rotation = Quaternion.Slerp(
+                sunLight.transform.rotation, target,
+                Time.deltaTime * estimatedLightSmoothing);
+
+            // UpdateSun() switches the light off below the computed horizon; the room's
+            // light has no horizon and must survive that.
+            sunLight.enabled = true;
+        }
 
         // Sun COLOUR and INTENSITY from estimation � direction stays computed.
         // Forced daylight owns both, or a dim room would immediately undo it.

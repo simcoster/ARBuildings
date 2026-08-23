@@ -114,16 +114,45 @@ public class BuildingLoader : MonoBehaviour
     /// </summary>
     public float ModelHeightMetres { get; private set; }
 
+    /// <summary>Shaders the imported materials ended up on. Decides whether it can cast.</summary>
+    public string ShaderNames { get; private set; } = "unknown";
+
     /// <summary>Model state for the capture button.</summary>
     public string StateReport =>
         $"model file         : {streamingAssetsFile}\n" +
         $"load state         : {State} ({LastMessage})\n" +
         $"renderers          : {RendererCount}\n" +
+        $"material shaders   : {ShaderNames}\n" +
         $"size mode          : {sizeMode} (axis {footprintAxis}, target {targetHeightMetres} m)\n" +
         $"applied scale      : x{AppliedScale:F4}\n" +
         $"recenter on anchor : {recenterOnAnchor}\n" +
         $"model height       : {ModelHeightMetres:F2} m (alignment-root metres)\n" +
-        $"world bounds@load  : {BoundsSize.x:F1} x {BoundsSize.y:F1} x {BoundsSize.z:F1} m\n";
+        $"world bounds@load  : {BoundsSize.x:F1} x {BoundsSize.y:F1} x {BoundsSize.z:F1} m\n" +
+        $"cull bounds now    : {CullBoundsReadout}\n";
+
+    /// <summary>
+    /// The bounds Unity actually culls against, RIGHT NOW, versus where the model is drawn.
+    /// A centre that does not sit inside the model, or a size much smaller than the model,
+    /// means it will pop out of view near the edge of the frame while still visible.
+    /// </summary>
+    public string CullBoundsReadout
+    {
+        get
+        {
+            if (LoadedParent == null) return "no model";
+
+            var renderers = LoadedParent.GetComponentsInChildren<Renderer>();
+            if (renderers.Length == 0) return "no renderers";
+
+            var b = renderers[0].bounds;
+            for (int i = 1; i < renderers.Length; i++) b.Encapsulate(renderers[i].bounds);
+
+            Vector3 drawn = LoadedParent.TransformPoint(LocalBounds.center);
+
+            return $"centre {b.center}, size {b.size.x:F1} x {b.size.y:F1} x {b.size.z:F1} m, " +
+                   $"{Vector3.Distance(b.center, drawn):F2} m from where it is drawn";
+        }
+    }
 
     void Awake() => Instance = this;
 
@@ -239,6 +268,40 @@ public class BuildingLoader : MonoBehaviour
             r.receiveShadows = true;
         }
 
+        // Bounds decide CULLING, and a mesh whose bounds do not match its vertices gets culled
+        // while it is still on screen — the model vanishing and reappearing as the phone tilts,
+        // worst when it sits near the edge of the frame. Recalculating is cheap, happens once,
+        // and is harmless when the bounds were right to begin with.
+        var rebounded = new System.Collections.Generic.HashSet<Mesh>();
+        foreach (var r in renderers)
+        {
+            var mf = r.GetComponent<MeshFilter>();
+            var mesh = mf != null ? mf.sharedMesh : null;
+
+            if (mesh != null && rebounded.Add(mesh)) mesh.RecalculateBounds();
+        }
+
+        if (rebounded.Count > 0)
+            Debug.Log($"[Loader] recalculated bounds on {rebounded.Count} mesh(es)");
+
+        // WHICH shader the importer chose, which is the part shadowCastingMode cannot tell
+        // you: a material whose shader has no ShadowCaster pass is set to cast and casts
+        // nothing, and the symptom — a lit model throwing no shadow onto a working catcher —
+        // looks identical to a broken light, a broken catcher, or a shadow that has simply
+        // landed out of sight.
+        var shaderNames = new System.Collections.Generic.HashSet<string>();
+        foreach (var r in renderers)
+        {
+            foreach (var m in r.sharedMaterials)
+                if (m != null && m.shader != null) shaderNames.Add(m.shader.name);
+        }
+
+        ShaderNames = shaderNames.Count > 0
+            ? string.Join(", ", shaderNames)
+            : "none";
+
+        Debug.Log($"[Loader] materials use: {ShaderNames}");
+
         if (renderers.Length > 0)
         {
             BoundsSize = MeasureWorldBounds(renderers).size;
@@ -276,7 +339,16 @@ public class BuildingLoader : MonoBehaviour
         // a building sits on the ground rather than being impaled by it. In depth: the front
         // face, because the surveyed point is on the facade; centring would push half the
         // building's depth out through the real wall towards the viewer.
-        float depth = anchorAlign == AnchorAlign.FrontFace ? -local.max.z : -local.center.z;
+        //
+        // MIN.z, not max.z. This model's facade is its -Z extreme, so pinning max.z put the
+        // BACK of the building on the surveyed facade point and extruded all 33.4 m of depth
+        // out across the plaza towards the viewer — at full scale that swallowed the camera,
+        // and at 0.2 scale it left a small block sitting out on the pavement. Measured on
+        // site 2026-08-23: the anchor itself was right to within a metre, the body was simply
+        // on the wrong side of it. A 180 deg modelFrontOffsetDeg does NOT fix this — yaw
+        // turns facade and body together, so it trades a wrong-side body for a facade that
+        // faces away from the street.
+        float depth = anchorAlign == AnchorAlign.FrontFace ? -local.min.z : -local.center.z;
         var offset = new Vector3(-local.center.x, -local.min.y, depth);
 
         if (offset.magnitude > 0.01f)

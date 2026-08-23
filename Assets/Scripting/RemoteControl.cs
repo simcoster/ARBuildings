@@ -216,6 +216,13 @@ public class RemoteControl : MonoBehaviour
                 streetscape.CutoutEnabled = OnOff(arg);
                 return $"cutout {(streetscape.CutoutEnabled ? "on" : "off")}";
 
+            // Diagnostic, not a look: paints the shadow catcher green where the shadow map
+            // says lit and red where it says shadowed.
+            case "catcher":
+                if (geospatial == null) return "no controller";
+                geospatial.ShadowCatcherDebug = OnOff(arg);
+                return $"catcher debug {(geospatial.ShadowCatcherDebug ? "on" : "off")}";
+
             case "mesh":
                 if (streetscape == null) return "no streetscape";
                 streetscape.VisualiseMeshes = OnOff(arg);

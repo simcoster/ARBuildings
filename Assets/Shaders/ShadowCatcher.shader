@@ -1,6 +1,16 @@
 Shader "AR/ShadowCatcher"
 {
-    Properties { _ShadowStrength("Shadow Strength", Range(0,1)) = 0.7 }
+    Properties
+    {
+        _ShadowStrength("Shadow Strength", Range(0,1)) = 0.7
+
+        // Diagnostic: paints the catcher by the shadow term instead of shading with it.
+        // "No shadow appears" has two opposite causes that look identical from a screenshot —
+        // the shadow map never being sampled (atten stays 1, catcher invisible) or the model
+        // simply not casting into it. Green = lit, red = shadowed, so one frame tells them
+        // apart. Off by default; turn on with `catcher on` over RemoteControl.
+        _Debug("Debug Attenuation", Float) = 0
+    }
 
     SubShader
     {
@@ -26,6 +36,7 @@ Shader "AR/ShadowCatcher"
             struct Varyings   { float4 positionCS : SV_POSITION; float3 positionWS : TEXCOORD0; };
 
             float _ShadowStrength;
+            float _Debug;
 
             Varyings vert(Attributes IN)
             {
@@ -41,6 +52,13 @@ Shader "AR/ShadowCatcher"
                 float4 shadowCoord = TransformWorldToShadowCoord(IN.positionWS);
                 Light  mainLight   = GetMainLight(shadowCoord);
                 half   atten       = mainLight.shadowAttenuation;
+
+                // Solid green where the shadow map says LIT, solid red where it says shadowed.
+                // A uniformly green quad means the catcher works and nothing is casting into
+                // it; no quad at all means the catcher is not drawing; red under the building
+                // means it works and the shadow was simply too subtle to see.
+                if (_Debug > 0.5)
+                    return half4(1.0 - atten, atten, 0.0, 0.55);
 
                 // Slightly blue rather than pure black: real outdoor shadow fill is
                 // sky-coloured, and a pure-black shadow always reads too strong.

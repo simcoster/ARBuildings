@@ -55,6 +55,32 @@ public class AdaptiveQuality : MonoBehaviour
 
     static char Letter(int tier) => (char)('A' + tier);
 
+    /// <summary>
+    /// Shadow distance to hold regardless of tier, in metres. 0 leaves the tier's own value.
+    ///
+    /// A tier's shadow distance is sized for a real building tens of metres away. The preview
+    /// miniature is 0.4 m across, and Tier C spreads a 512-pixel shadow map over 60 m — 11.7 cm
+    /// per texel, wider than the miniature is TALL. Its shadow rounds away to nothing, and the
+    /// 1-texel normal bias finishes the job, so preview shows no shadow at any sun angle. That
+    /// reads as broken lighting rather than as a resolution limit, which is why this exists.
+    ///
+    /// Re-applied after every tier change: a drop mid-session would otherwise silently restore
+    /// the 60 m value and take the shadow with it.
+    /// </summary>
+    public float ShadowDistanceOverride
+    {
+        get => _shadowDistanceOverride;
+        set { _shadowDistanceOverride = value; ApplyShadowDistance(); }
+    }
+
+    float _shadowDistanceOverride;
+
+    void ApplyShadowDistance()
+    {
+        if (_shadowDistanceOverride > 0f)
+            QualitySettings.shadowDistance = _shadowDistanceOverride;
+    }
+
     void Start()
     {
         Application.targetFrameRate = targetFrameRate;
@@ -63,6 +89,7 @@ public class AdaptiveQuality : MonoBehaviour
         _tier = Mathf.Clamp(_tier, 0, LowestTier);
         _startTier = _tier;
         QualitySettings.SetQualityLevel(_tier, true);
+        ApplyShadowDistance();
     }
 
     static int GuessTier()
@@ -106,6 +133,7 @@ public class AdaptiveQuality : MonoBehaviour
             _tier++;
             _drops++;
             QualitySettings.SetQualityLevel(_tier, true);
+            ApplyShadowDistance();
             Debug.Log($"Dropped to quality tier {_tier} ({Letter(_tier)}) (avg {avgMs:F1} ms)");
         }
     }

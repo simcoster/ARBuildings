@@ -190,6 +190,15 @@ public class AlignmentNudge : MonoBehaviour
 
     public void SetValue(Param p, float value)
     {
+        // A single NaN reaching a Transform poisons the whole hierarchy and the model
+        // disappears with no error in the log — which is exactly how the broken slider
+        // mapping presented. Refuse it here too, so no future caller can repeat that.
+        if (float.IsNaN(value) || float.IsInfinity(value))
+        {
+            Debug.LogWarning($"[Adjust] refused a non-finite value for {p} — ignoring.");
+            return;
+        }
+
         switch (p)
         {
             case Param.Rotate: Current.headingDeg = value; break;
@@ -209,6 +218,50 @@ public class AlignmentNudge : MonoBehaviour
         Dirty = true;
         Apply();
     }
+
+    /// <summary>
+    /// Where fine control lives on a signed logarithmic slider, in metres. Below this the
+    /// mapping is effectively linear; above it each further metre costs less travel.
+    /// </summary>
+    const float SignedLogKnee = 0.5f;
+
+    /// <summary>
+    /// Value -> slider position, and back. Both directions live here so they cannot drift
+    /// apart, and so nothing else has to know that a range spanning zero cannot be mapped
+    /// with a plain log.
+    ///
+    /// A plain Mathf.Log() mapping over min=-150 returned NaN, the NaN was written straight
+    /// back into the offset — Mathf.Approximately(NaN, NaN) is false, so the slider "changed"
+    /// on the very first frame — and the model vanished the instant the X or Y button was
+    /// pressed. Signed log keeps the intent (fine control near zero over a 300 m span) and
+    /// is defined across the whole range.
+    /// </summary>
+    public static float ToSlider(float value, float min, float max, bool logarithmic)
+    {
+        if (!logarithmic) return Mathf.InverseLerp(min, max, value);
+
+        if (min < 0f)
+            return Mathf.InverseLerp(SignedLog(min), SignedLog(max), SignedLog(value));
+
+        return Mathf.InverseLerp(Mathf.Log(min), Mathf.Log(max),
+                                 Mathf.Log(Mathf.Clamp(value, min, max)));
+    }
+
+    public static float FromSlider(float t, float min, float max, bool logarithmic)
+    {
+        if (!logarithmic) return Mathf.Lerp(min, max, t);
+
+        if (min < 0f)
+            return SignedExp(Mathf.Lerp(SignedLog(min), SignedLog(max), t));
+
+        return Mathf.Exp(Mathf.Lerp(Mathf.Log(min), Mathf.Log(max), t));
+    }
+
+    static float SignedLog(float v) =>
+        Mathf.Sign(v) * Mathf.Log(1f + Mathf.Abs(v) / SignedLogKnee);
+
+    static float SignedExp(float s) =>
+        Mathf.Sign(s) * SignedLogKnee * (Mathf.Exp(Mathf.Abs(s)) - 1f);
 
     public static void RangeOf(Param p, out float min, out float max, out bool logarithmic)
     {

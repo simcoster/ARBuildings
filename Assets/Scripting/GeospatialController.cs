@@ -84,6 +84,12 @@ public class GeospatialController : MonoBehaviour
     [Tooltip("Size of that invisible ground patch, as a multiple of the model's footprint.")]
     [SerializeField] float shadowGroundScale = 3f;
 
+    [Tooltip("Shadow distance to hold while preview is on, in metres. The tier's own value " +
+             "is sized for a real building and leaves a table-top miniature with too few " +
+             "shadow-map texels to cast anything at all. Only needs to cover the few metres " +
+             "between you and the model.")]
+    [SerializeField] float previewShadowDistanceMetres = 8f;
+
     [Tooltip("On placement, size the model so its height is this fraction of the distance " +
              "to it. 0.5 puts the whole building comfortably on screen and guarantees you " +
              "are never standing inside it. 0 = never auto-size.")]
@@ -452,6 +458,7 @@ public class GeospatialController : MonoBehaviour
         // ground at all, so one gets made — otherwise the model appears to cast nothing.
         if (_previewRoot != null) CreateShadowGround(nudgeRoot);
 
+
         // Nothing to ghost in preview: there is no streetscape geometry indoors, and the
         // miniature's anchor point would land inside whatever mesh happened to exist.
         if (streetscapeShadows != null && _previewRoot == null) streetscapeShadows.SetTarget(anchor);
@@ -554,11 +561,53 @@ public class GeospatialController : MonoBehaviour
     /// Everything this component knows, for the capture button. Each class reports its own
     /// state so the dump cannot drift out of step with the code the way a central one would.
     /// </summary>
+    /// <summary>
+    /// When this APK was built, written by BuildAndroid at build time. The answer to "is the
+    /// change I just made actually on the phone?", which otherwise cannot be told from the
+    /// device at all — and getting it wrong costs a whole build cycle.
+    /// </summary>
+    public static string BuildStamp
+    {
+        get
+        {
+            if (_buildStamp != null) return _buildStamp;
+
+            var asset = Resources.Load<TextAsset>("BuildStamp");
+            _buildStamp = asset != null ? asset.text.Trim() : "unstamped (built without BuildAndroid)";
+            return _buildStamp;
+        }
+    }
+
+    static string _buildStamp;
+
+    /// <summary>
+    /// The anchor the model hangs from, and whether it is ACTIVE. AR Foundation can deactivate
+    /// a trackable when its tracking degrades, and every child — the whole model — goes with
+    /// it. That looks like the model flickering out, with nothing wrong in the placement, and
+    /// is the first thing to check when it vanishes while the anchor pose holds steady.
+    /// </summary>
+    string AnchorTrackableReadout
+    {
+        get
+        {
+            var anchor = _previewAnchor;
+
+            if (anchor == null && AnchorTransform != null)
+                anchor = AnchorTransform.GetComponentInParent<ARAnchor>();
+
+            if (anchor == null) return "none (plain transform — cannot be deactivated)";
+
+            return $"{anchor.trackingState}, active={anchor.gameObject.activeInHierarchy}, " +
+                   $"pending={anchor.pending}";
+        }
+    }
+
     public string StateReport
     {
         get
         {
-            var report = $"site id            : {siteId}\n" +
+            var report = $"build stamp        : {BuildStamp}\n" +
+                         $"site id            : {siteId}\n" +
                          $"phase              : {CurrentPhase}\n" +
                          $"readout            : {DebugReadout.Replace("\n", " | ")}\n" +
                          $"configured lat/lng : {latitude:F7}, {longitude:F7}\n" +
@@ -597,6 +646,18 @@ public class GeospatialController : MonoBehaviour
                     : -1f;
                 report += $"anchor world pos   : {AnchorTransform.position}\n" +
                           $"anchor distance    : {distance:F1} m\n";
+            }
+
+            // Which grounding surfaces actually EXIST, and where. "No shadow" has two very
+            // different causes — nothing casting, or nothing to catch it — and the capture
+            // could not previously tell them apart.
+            if (_hierarchyRoot != null)
+            {
+                var ground = _hierarchyRoot.transform.Find("ShadowGround");
+
+                report += $"anchor trackable   : {AnchorTrackableReadout}\n";
+                report += $"shadow ground      : {(ground != null ? $"y at {ground.position}, world span {ground.lossyScale.x:F2} m" : "ABSENT")}\n";
+                report += $"catcher debug      : {_shadowCatcherDebug}\n";
             }
 
             return report;
@@ -660,6 +721,34 @@ public class GeospatialController : MonoBehaviour
         return true;
     }
 
+    /// <summary>
+    /// The Earth coordinate of an arbitrary world point — what the streetscape probe aims at,
+    /// so a mesh under the crosshair can be named by address rather than by session handle.
+    ///
+    /// Deliberately NOT gated on <see cref="CanSaveCoordinates"/>: that gate protects a
+    /// surveyed coordinate from being overwritten by a rough fix, whereas a read-only "roughly
+    /// where am I pointing" is worth having at any accuracy. Tracking alone is the bar.
+    /// </summary>
+    public bool TryConvertPoint(Vector3 worldPoint, out double latitude, out double longitude,
+                                out double altitude)
+    {
+        latitude = 0;
+        longitude = 0;
+        altitude = 0;
+
+        if (earthManager == null ||
+            earthManager.EarthState != EarthState.Enabled ||
+            earthManager.EarthTrackingState != TrackingState.Tracking)
+            return false;
+
+        var geospatial = earthManager.Convert(new Pose(worldPoint, Quaternion.identity));
+
+        latitude = geospatial.Latitude;
+        longitude = geospatial.Longitude;
+        altitude = geospatial.Altitude;
+        return true;
+    }
+
     /// <summary>Where the model's own origin sits on Earth right now, if that is knowable.</summary>
     bool TryCaptureCoordinates(out double latitude, out double longitude)
     {
@@ -720,6 +809,22 @@ public class GeospatialController : MonoBehaviour
 
         if (on) EnterPreview();
         else ExitPreview();
+
+        ApplyPreviewShadowDistance(on);
+    }
+
+    /// <summary>
+    /// The miniature needs its own shadow distance. A tier's value is sized for a building
+    /// tens of metres off and leaves far too few shadow-map texels on a 0.4 m model for any
+    /// shadow to survive — see AdaptiveQuality.ShadowDistanceOverride for the arithmetic.
+    /// Looked up on toggle rather than cached, so a scene without the component just skips.
+    /// </summary>
+    void ApplyPreviewShadowDistance(bool previewOn)
+    {
+        var quality = FindFirstObjectByType<AdaptiveQuality>();
+        if (quality == null) return;
+
+        quality.ShadowDistanceOverride = previewOn ? previewShadowDistanceMetres : 0f;
     }
 
     void EnterPreview()
@@ -771,6 +876,10 @@ public class GeospatialController : MonoBehaviour
         if (_previewRoot != null) Destroy(_previewRoot.gameObject);
         _previewRoot = null;
 
+        // Ours to destroy, unlike the geospatial anchor, which the session owns.
+        if (_previewAnchor != null) Destroy(_previewAnchor.gameObject);
+        _previewAnchor = null;
+
         if (_syntheticAnchor != null) Destroy(_syntheticAnchor);
         _syntheticAnchor = null;
 
@@ -779,6 +888,84 @@ public class GeospatialController : MonoBehaviour
     }
 
     Camera PreviewCamera => previewCamera != null ? previewCamera : Camera.main;
+
+    /// <summary>The real ARCore anchor the preview hangs from, when one could be created.</summary>
+    ARAnchor _previewAnchor;
+
+    bool _shadowCatcherDebug;
+
+    /// <summary>
+    /// Paints the shadow catcher by its shadow term — green lit, red shadowed — instead of
+    /// shading with it. Toggled over RemoteControl so a diagnosis costs a file push rather
+    /// than a rebuild, and so nobody is stranded at a site with a coloured floor.
+    /// </summary>
+    public bool ShadowCatcherDebug
+    {
+        get => _shadowCatcherDebug;
+        set
+        {
+            _shadowCatcherDebug = value;
+
+            if (shadowCatcherMaterial == null)
+                shadowCatcherMaterial = Resources.Load<Material>("ShadowCatcher");
+
+            if (shadowCatcherMaterial != null)
+                shadowCatcherMaterial.SetFloat("_Debug", value ? 1f : 0f);
+        }
+    }
+
+    /// <summary>
+    /// Pins the preview to a REAL ARCore anchor instead of leaving it at fixed session
+    /// coordinates.
+    ///
+    /// PreviewRoot is a plain Transform, so its pose is fixed in the SESSION's frame — and
+    /// that frame is not fixed to the room. ARCore keeps refining its map as the phone moves,
+    /// and every correction shifts the session frame underneath anything not anchored, which
+    /// looks exactly like the model slowly creeping across the floor. An ARAnchor is moved by
+    /// those same corrections, so the model stays where it was put.
+    ///
+    /// The GPS path never needed this — it hangs off a resolved terrain anchor already.
+    /// </summary>
+    async void AnchorPreviewRoot(Vector3 point)
+    {
+        if (anchorManager == null || _previewRoot == null) return;
+
+        // Kept, NOT destroyed yet: the preview is parented to this anchor, so destroying it
+        // here would take PreviewRoot, the model and the shadow surfaces down with it as
+        // children. It can only go once the preview has been re-parented onto the new one.
+        var previous = _previewAnchor;
+
+        // Rotation is the model's business, not the anchor's: the anchor only has to hold a
+        // POINT still. Baking the building's heading into it would mean re-anchoring on
+        // every rotation nudge.
+        var result = await anchorManager.TryAddAnchorAsync(new Pose(point, Quaternion.identity));
+
+        if (!result.status.IsSuccess())
+        {
+            // Keep the old anchor rather than ending up with none at all.
+            Debug.LogWarning($"[Preview] no anchor ({result.status}) — keeping the previous " +
+                             "one; the model may drift as ARCore refines its map.");
+            return;
+        }
+
+        // Preview can be torn down while the request is in flight; the anchor would then
+        // outlive the thing it was made for.
+        if (_previewRoot == null)
+        {
+            if (result.value != null) Destroy(result.value.gameObject);
+            return;
+        }
+
+        _previewAnchor = result.value;
+
+        // worldPositionStays: the model has already been placed exactly where it was tapped.
+        _previewRoot.SetParent(_previewAnchor.transform, true);
+
+        // Childless now, so this cannot take the preview with it.
+        if (previous != null) Destroy(previous.gameObject);
+
+        Debug.Log($"[Preview] anchored at {point}");
+    }
 
     /// <summary>
     /// Puts the miniature in front of you, front facade toward you, and drops its base by a
@@ -817,6 +1004,10 @@ public class GeospatialController : MonoBehaviour
                      Quaternion.Euler(0f, -placement.ModelFrontOffsetDeg, 0f);
 
         _previewRoot.SetPositionAndRotation(position, facing);
+
+        // Re-anchor: recentring moves the model off whatever anchor a previous placement
+        // gave it, and an unanchored preview drifts again.
+        AnchorPreviewRoot(position);
     }
 
     /// <summary>
@@ -913,6 +1104,8 @@ public class GeospatialController : MonoBehaviour
             point,
             Quaternion.LookRotation(toCamera.normalized, Vector3.up) *
             Quaternion.Euler(0f, -placement.ModelFrontOffsetDeg, 0f));
+
+        AnchorPreviewRoot(point);
 
         Debug.Log($"[Preview] placed on floor {_previewRefDistance:F2} m away, " +
                   $"scale 1:{(previewViewDistance / Mathf.Max(0.01f, _previewRefDistance)):F0}");

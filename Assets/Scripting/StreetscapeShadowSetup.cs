@@ -51,6 +51,22 @@ public class StreetscapeShadowSetup : MonoBehaviour
     /// <summary>How many got the ghost material — &gt;1 means merged meshes over-selected.</summary>
     public int GhostedCount { get; private set; }
 
+    /// <summary>
+    /// Streetscape meshes actually being drawn. The number that matters when the model
+    /// disappears: 0 means nothing streetscape can be hiding it, whatever the HUD claims.
+    /// </summary>
+    public int DrawingCount
+    {
+        get
+        {
+            int n = 0;
+            foreach (var r in _renderers.Values)
+                if (r != null && r.enabled) n++;
+
+            return n;
+        }
+    }
+
     // ------------------------------------------------------------------ cutout
 
     static readonly int CutoutMatrixId = Shader.PropertyToID("_OccluderCutoutWorldToLocal");
@@ -91,11 +107,44 @@ public class StreetscapeShadowSetup : MonoBehaviour
         set => cutoutEnabled = value;
     }
 
-    /// <summary>Master occlusion switch, toggleable from the HUD.</summary>
+    /// <summary>
+    /// Master occlusion switch, toggleable from the HUD. OFF means NOTHING streetscape can
+    /// hide the model — no depth, no paint, no shadow.
+    ///
+    /// This disables the RENDERERS rather than setting a shader global, because the global
+    /// never worked. `AR/StreetscapeOccluderShadow` has three passes and only "Occluder"
+    /// tests `_OccludersDisabled`; "ShadowReceive" still paints the mesh over whatever is
+    /// behind it and "ShadowCaster" still writes the shadow map. On site 2026-08-23 that made
+    /// the toggle a no-op — ARCore's terrain slab sat between the camera and the model and
+    /// covered it identically in both states, which cost most of a site visit to pin down.
+    /// Turning the renderer off cannot be defeated by a pass nobody remembered to guard.
+    ///
+    /// The trade is real and deliberate: with occluders off the terrain no longer catches the
+    /// model's shadow either. Correctness of "can I see the model at all" outranks it.
+    /// </summary>
     public bool OccludersEnabled
     {
         get => occludersEnabled;
-        set => occludersEnabled = value;
+        set
+        {
+            occludersEnabled = value;
+            ApplyOccluderVisibility();
+        }
+    }
+
+    /// <summary>
+    /// Applies the master switch to every streamed mesh. Called on toggle and on every Add,
+    /// because streetscape meshes keep arriving and a new one must not sneak in enabled.
+    /// </summary>
+    void ApplyOccluderVisibility()
+    {
+        // Visualisation wins: `mesh on` exists to show where ARCore's geometry actually is,
+        // and it has to keep working while occluders are off — that combination is what
+        // proved the terrain slab was the thing swallowing the model.
+        bool visible = occludersEnabled || visualiseMeshes;
+
+        foreach (var r in _renderers.Values)
+            if (r != null) r.enabled = visible;
     }
 
     /// <summary>Human-readable cutout state for the capture report.</summary>
@@ -241,6 +290,8 @@ public class StreetscapeShadowSetup : MonoBehaviour
         $"by type            : {GeometryTypeBreakdown}\n" +
         $"target coverage    : {BuildingProximityReadout}\n" +
         $"ghosted meshes     : {GhostedCount}  (only possible where a Building mesh exists)\n" +
+        $"occluders enabled  : {occludersEnabled}\n" +
+        $"renderers drawing  : {DrawingCount} of {MeshCount}  (0 = nothing can hide the model)\n" +
         $"occluder cutout    : {CutoutReadout}\n" +
         $"ghosting enabled   : {ghostTargetBuilding}\n" +
         $"target anchor set  : {targetAnchor != null}\n" +
@@ -248,7 +299,217 @@ public class StreetscapeShadowSetup : MonoBehaviour
         $"materials          : occluder={(occluderMaterial != null)} ghost={(ghostMaterial != null)} " +
         $"debug={(debugMaterial != null)}\n";
 
-    // --------------------------------------------------------------- lifecycle    // --------------------------------------------------------------- lifecycle
+    // ------------------------------------------------------------------- probe
+
+    /// <summary>One streetscape mesh, described without handing out its renderer.</summary>
+    public struct GeometryInfo
+    {
+        public TrackableId id;
+        public StreetscapeGeometryType type;
+        public StreetscapeGeometryQuality quality;
+
+        /// <summary>World-space AABB, so once rotated it is a superset of the real mesh.</summary>
+        public Bounds bounds;
+
+        public int triangleCount;
+    }
+
+    /// <summary>Where a ray met a streetscape mesh, and what it met.</summary>
+    public struct ProbeHit
+    {
+        public TrackableId id;
+        public StreetscapeGeometryType type;
+        public StreetscapeGeometryQuality quality;
+        public Vector3 point;
+
+        /// <summary>World normal of the struck triangle.</summary>
+        public Vector3 normal;
+
+        public float distance;
+
+        /// <summary>Triangles in the whole mesh — a footprint extrusion has very few.</summary>
+        public int triangleCount;
+
+        /// <summary>
+        /// What was struck, from the triangle normal. A facade ray that comes back "roof" has
+        /// hit the flat lid of an extruded footprint from above, not a wall.
+        /// </summary>
+        public string Surface =>
+            normal.y > 0.7f ? "roof" :
+            normal.y < -0.7f ? "underside" :
+            Mathf.Abs(normal.y) < 0.35f ? "wall" : "sloped";
+    }
+
+    /// <summary>
+    /// TrackableIds print as two 16-digit hex words, which is unreadable on a phone screen.
+    /// The low digits are the part that differs between trackables in one session.
+    /// </summary>
+    public static string ShortId(TrackableId id)
+    {
+        string text = id.ToString();
+        return text.Length <= 6 ? text : text.Substring(text.Length - 6);
+    }
+
+    /// <summary>Every streamed mesh, refilled into the caller's list so nothing allocates.</summary>
+    public void CollectGeometries(List<GeometryInfo> results)
+    {
+        results.Clear();
+        if (streetscapeManager == null) return;
+
+        foreach (var kv in _renderers)
+        {
+            if (kv.Value == null) continue;
+
+            var geometry = streetscapeManager.GetStreetscapeGeometry(kv.Key);
+            if (geometry == null) continue;
+
+            results.Add(new GeometryInfo
+            {
+                id = kv.Key,
+                type = geometry.streetscapeGeometryType,
+                quality = geometry.quality,
+                bounds = kv.Value.bounds,
+                triangleCount = TriangleCount(kv.Key, kv.Value),
+            });
+        }
+    }
+
+    /// <summary>
+    /// Ray-cast the streetscape on the CPU, nearest first.
+    ///
+    /// No colliders: the meshes are rebuilt as ARCore refines them, and cooking a MeshCollider
+    /// per update is far more expensive than a handful of triangle tests a few times a second.
+    /// The world AABB rejects most meshes before any triangle is touched.
+    /// </summary>
+    public void Probe(Ray ray, float maxDistance, List<ProbeHit> results)
+    {
+        results.Clear();
+        if (streetscapeManager == null) return;
+
+        foreach (var kv in _renderers)
+        {
+            var renderer = kv.Value;
+            if (renderer == null) continue;
+
+            if (!renderer.bounds.IntersectRay(ray, out float boundsDistance) ||
+                boundsDistance > maxDistance)
+                continue;
+
+            var data = MeshFor(kv.Key, renderer);
+            if (data == null) continue;
+
+            var geometry = streetscapeManager.GetStreetscapeGeometry(kv.Key);
+            if (geometry == null) continue;
+
+            // Streetscape poses carry no scale, so a local-space distance IS a world-space
+            // distance and needs no conversion back.
+            var t = renderer.transform;
+            var local = new Ray(t.InverseTransformPoint(ray.origin),
+                                t.InverseTransformDirection(ray.direction));
+
+            if (!RaycastMesh(data, local, maxDistance, out float distance, out Vector3 localNormal))
+                continue;
+
+            results.Add(new ProbeHit
+            {
+                id = kv.Key,
+                type = geometry.streetscapeGeometryType,
+                quality = geometry.quality,
+                point = ray.origin + ray.direction * distance,
+                normal = t.TransformDirection(localNormal).normalized,
+                distance = distance,
+                triangleCount = data.triangles.Length / 3,
+            });
+        }
+
+        results.Sort((a, b) => a.distance.CompareTo(b.distance));
+    }
+
+    /// <summary>Mesh geometry read back once per mesh instance rather than per probe.</summary>
+    sealed class MeshData
+    {
+        public Mesh mesh;
+        public Vector3[] vertices;
+        public int[] triangles;
+    }
+
+    readonly Dictionary<TrackableId, MeshData> _meshCache = new();
+
+    MeshData MeshFor(TrackableId id, MeshRenderer renderer)
+    {
+        var filter = renderer.GetComponent<MeshFilter>();
+        var mesh = filter != null ? filter.sharedMesh : null;
+        if (mesh == null) return null;
+
+        if (_meshCache.TryGetValue(id, out var data) && data.mesh == mesh)
+            return data;
+
+        // mesh.vertices and mesh.triangles both allocate a fresh array, which is exactly why
+        // this is cached and invalidated on update rather than read per ray.
+        data = new MeshData
+        {
+            mesh = mesh,
+            vertices = mesh.vertices,
+            triangles = mesh.triangles,
+        };
+
+        _meshCache[id] = data;
+        return data;
+    }
+
+    int TriangleCount(TrackableId id, MeshRenderer renderer)
+    {
+        var data = MeshFor(id, renderer);
+        return data == null ? 0 : data.triangles.Length / 3;
+    }
+
+    /// <summary>Möller–Trumbore against every triangle, keeping the nearest.</summary>
+    static bool RaycastMesh(MeshData data, Ray ray, float maxDistance,
+                            out float distance, out Vector3 normal)
+    {
+        distance = maxDistance;
+        normal = Vector3.up;
+
+        var vertices = data.vertices;
+        var triangles = data.triangles;
+        bool hit = false;
+
+        for (int i = 0; i < triangles.Length; i += 3)
+        {
+            Vector3 a = vertices[triangles[i]];
+            Vector3 b = vertices[triangles[i + 1]];
+            Vector3 c = vertices[triangles[i + 2]];
+
+            Vector3 e1 = b - a;
+            Vector3 e2 = c - a;
+            Vector3 p = Vector3.Cross(ray.direction, e2);
+            float det = Vector3.Dot(e1, p);
+
+            // Two-sided: streetscape walls are single-sided and can be met from either face.
+            if (Mathf.Abs(det) < 1e-8f) continue;
+
+            float invDet = 1f / det;
+            Vector3 tv = ray.origin - a;
+
+            float u = Vector3.Dot(tv, p) * invDet;
+            if (u < 0f || u > 1f) continue;
+
+            Vector3 q = Vector3.Cross(tv, e1);
+            float v = Vector3.Dot(ray.direction, q) * invDet;
+            if (v < 0f || u + v > 1f) continue;
+
+            float t = Vector3.Dot(e2, q) * invDet;
+            if (t < 0.01f || t >= distance) continue;
+
+            distance = t;
+            normal = Vector3.Cross(e1, e2);
+            hit = true;
+        }
+
+        return hit;
+    }
+
+    // --------------------------------------------------------------- lifecycle
 
     void OnEnable()
     {
@@ -291,6 +552,7 @@ public class StreetscapeShadowSetup : MonoBehaviour
             if (r != null) Destroy(r.gameObject);
 
         _renderers.Clear();
+        _meshCache.Clear();
 
         if (_container != null) Destroy(_container.gameObject);
     }
@@ -344,6 +606,10 @@ public class StreetscapeShadowSetup : MonoBehaviour
 
         _renderers[geometry.trackableId] = renderer;
 
+        // Born respecting the master switch: meshes stream in continuously, and one arriving
+        // enabled while occluders are off would silently start hiding the model again.
+        renderer.enabled = occludersEnabled;
+
         ApplyMesh(filter, geometry);
         ApplyPose(go.transform, geometry);
         ApplyMaterial(renderer, geometry);
@@ -356,6 +622,10 @@ public class StreetscapeShadowSetup : MonoBehaviour
             Add(geometry);
             return;
         }
+
+        // ARCore may refine a mesh in place, keeping the same Mesh instance, so the probe
+        // cache cannot detect the change on its own.
+        _meshCache.Remove(geometry.trackableId);
 
         ApplyMesh(renderer.GetComponent<MeshFilter>(), geometry);
         ApplyPose(renderer.transform, geometry);
@@ -370,6 +640,7 @@ public class StreetscapeShadowSetup : MonoBehaviour
 
         if (renderer != null) Destroy(renderer.gameObject);
         _renderers.Remove(geometry.trackableId);
+        _meshCache.Remove(geometry.trackableId);
     }
 
     // ------------------------------------------------------------------ apply
@@ -415,6 +686,10 @@ public class StreetscapeShadowSetup : MonoBehaviour
                                  "XR Origin > Streetscape Shadow Setup > Debug Material.");
 
             RefreshAllMaterials();
+
+            // Visualisation forces the renderers back on even with occluders off, and turning
+            // it off must hand them back to the master switch rather than leave them drawing.
+            ApplyOccluderVisibility();
         }
     }
 

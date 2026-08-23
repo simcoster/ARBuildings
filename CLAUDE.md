@@ -1,8 +1,8 @@
 # AR_Buildings
 
 Unity 6 (6000.5.7f1) ARCore Geospatial app that overlays a 3D building model onto the real
-building at a surveyed coordinate. URP, AR Foundation 6.5, ARCore Extensions 1.54, glTFast
-6.19, Cesium for Unity 1.25. Android is the only target that has ever been built.
+building at a surveyed coordinate. Android is the only target that has ever been built.
+Package versions live in `Packages/manifest.json`.
 
 Site visits are the most expensive thing in this project. A desk simulator against Google's
 3D tiles was built to avoid them and then removed, because Google has no usable reconstruction
@@ -32,6 +32,14 @@ adb logcat -d | grep -i "native"            # ARCore's own errors live under tag
 adb exec-out screencap -p > shot.png        # then read the image; the HUD shows most state
 ```
 
+**Screenshot BEFORE changing anything visual — including when the symptom was described to
+you.** A description is a hypothesis to check, not a spec to code against. "A grey square
+round the model" was the contact-shadow quad, not the shadow catcher, and only measuring the
+patch against `contact shadow:` / `shadow ground:` in the capture dump told the two apart —
+a coin-flip that costs a 15-minute rebuild to get wrong. Crop and enlarge with .NET
+`System.Drawing` from PowerShell (there is no PIL here), and add a `ColorMatrix` contrast
+boost when looking for something faint like a shadow.
+
 **Compile check without opening Unity** (seconds, catches all C# errors):
 
 ```bash
@@ -41,6 +49,45 @@ dotnet build Assembly-CSharp.csproj -v q --nologo 2>&1 | grep -E "error|Build su
 A brand-new `.cs` file is missing from the generated `.csproj` until Unity imports it, so
 that build will report "type not found" for it. Add a `<Compile Include=...>` line manually
 to verify, or ignore that one error. The csproj is gitignored and Unity regenerates it.
+
+### Building without the Editor — and what it costs
+
+`Assets/Editor/BuildAndroid.cs` builds from the command line, so no Editor session is needed
+(the two are mutually exclusive: the Editor holds a project lock). Scenes come from
+`EditorBuildSettings`, so it cannot drift from what Build & Run would produce, and it exits
+non-zero on failure — a failed batch build otherwise reads exactly like a success.
+
+```bash
+"C:/Program Files/Unity/Hub/Editor/6000.5.7f1/Editor/Unity.exe" -quit -batchmode \
+  -projectPath C:/dev/ARBuildings -buildTarget Android \
+  -executeMethod BuildAndroid.Build -outputPath C:/dev/ARBuildings/builds/current.apk \
+  -logFile build.log
+```
+
+**Measured build times on this laptop, warm `Library`:**
+
+| change | time |
+|---|---|
+| C# only | **~4 min 20 s** |
+| anything touching a `.shader` | **~15 min 30 s** |
+
+Shader variant compilation is the entire difference, so **put new knobs behind material
+properties rather than shader edits** — flipping a float over `RemoteControl` costs nothing,
+recompiling a shader costs a quarter of an hour. The Editor's own Build & Run is slower again
+than batchmode (cold shader cache, full refresh); prefer the command line.
+
+Two batchmode traps seen here: the first run after an Editor session died silently mid-compile
+with exit 1 and an empty log (a second run succeeded), and `-nographics` was in use for that
+failed run — drop it. Kill a build mid-IL2CPP and you lose the in-flight cache, so the next one
+is slower.
+
+**A reinstall may wipe `/sdcard/Android/data/com.pavel.arbuildings/files/`** — sometimes it
+does, sometimes it doesn't, with no obvious pattern. That takes `buildings.json` **and**
+`adjustments.json` (baked coordinates included) with it. Pull both before every install:
+
+```bash
+adb pull $DEV/buildings.json .; adb pull $DEV/adjustments.json .
+```
 
 ### Driving it from the laptop — `RemoteControl`
 
@@ -67,6 +114,12 @@ should not require knowing the current value first.
 | `reload` | re-read `buildings.json` — pair it with pushing a new one |
 | `preview on\|off` `occlude on\|off` `cut on\|off` `mesh on\|off` `sun on\|off` `aspect on\|off` | the HUD toggles |
 | `capture` `recenter` `state` | screenshot + dump, recentre preview, force a state write |
+| `catcher on\|off` | diagnostic: paint the shadow catcher by its shadow term — green lit, red shadowed |
+
+**`preview on` over the remote does NOT turn forced daylight on**, though the HUD's preview
+button does. Indoors or after dark that means a remote-driven preview has its sun switched
+off below the horizon and shows an unlit model against a black scene. Always pair it:
+`preview on` + `sun on`.
 
 The command file is deleted once handled, so pushing the same file again re-runs it. Bare
 `occlude` with no argument means on.
@@ -157,14 +210,9 @@ coordinates then outrank `buildings.json` on the next run. `clear saved` deletes
 
 ## The HUD
 
-Right column, top to bottom: `hide` · `mesh` (streetscape debug material) · `reload` (re-read
-buildings.json) · `cut` (cutout on/off) · `light` (sky dome) · `capture` · `occlude` (master
-occlusion switch, reads `OCC OFF` in orange when disabled).
-
-Left: `preview` · `recenter` · `sun` (forced daylight) · `place on floor`.
-
-Bottom: `rot | scale | X | Y | up` selector, one slider, then `save + GPS` · `reset` ·
-`clear saved`. `pick`/`auto` (tap-to-ghost) were removed — see the occlusion section.
+Button layout is whatever `DebugHud.OnGUI` draws — read it there, including for screen
+coordinates when driving the HUD over `adb shell input tap`. `pick`/`auto` (tap-to-ghost) were
+removed; see the occlusion section.
 
 The light dome is a sky seen from above: centre = zenith, rim = horizon, up-screen = north.
 Coloured cells are the ambient probe by direction, yellow square is the computed sun, small
@@ -223,130 +271,30 @@ raycast machinery; it is in git history if another site ever needs it.
 
 ### Confirmed: Google has no building geometry at this site
 
-Checked 2026-08-20 with the Python `streetlevel` package against the Street View panorama
-standing right outside the synagogue — `pW3oIq-OzNNDlks5mYZClg`, at 32.083688, 34.815228,
-dated 2022-07, 13.9 m north of the surveyed facade midpoint. Its depth map has **56 planes
-and not one of them is the synagogue**:
+Street View depth maps at this junction carry **56 planes and not one of them is the
+synagogue** — every historical pano back to 2011 has exactly one wall plane, and it is always
+the hillside 80–90 m to the north. Google models the raised plaza the building stands on and
+stops there. Panos 50–95 m away on the same street *do* carry near-field walls, so the
+reconstruction pipeline works fine in the neighbourhood; it just has nothing for this address.
+**The cutout is the only occlusion mechanism that will ever work at this site** — do not spend
+more time on ghosting here.
 
-| planes | pixels | what |
-|---|---|---|
-| plane 0 | 49.7% | `INFINITELY_FAR` — literally everything above the horizon |
-| 1–8, 10–55 | 50.1% | all near-horizontal (`\|n_z\| ≈ 1`), d = 2.4–20 m: road, pavement, the raised plaza |
-| plane 9 | 0.24% | the **only** vertical plane — 89.4 m away at bearing 347°–1°, i.e. the hillside to the north |
-
-In the building's own column band (cols 339–442, spanning cornerA→cornerB) 13180 of 13184
-above-horizon pixels are plane 0. Below the horizon it is ground planes 1–2 (d ≈ 2.4–2.5 m,
-the road) and 6–8 (d ≈ 2.9–3.4 m, the podium ~0.5–0.9 m up). Google models the raised plaza
-the building stands on, and stops there.
-
-Not a one-off capture — every historical pano at the same spot has exactly one wall plane and
-it is always that same distant one: `Na7Kitj22j9zOWd9HNlELg` 2019-01 @ 87.2 m,
-`RD5IvfXg0YOW8o2YgE79mQ` 2017-12 @ 82.4 m, `VTOiSl88U0TrQp9dQPRKew` 2015-02 @ 84.3 m,
-`6bbvLjrbYIhLlBsx4Cm_jg` 2011-11 @ 87.1 m. Panos 50–95 m away on the same street *do* carry
-near-field walls at 10–50 m, so the reconstruction pipeline works fine in the neighbourhood;
-it just has nothing for this junction.
-
-**Caveat**: ARCore Streetscape Geometry is served from Google's 3D building tiles, not from
-Street View depth maps, so this is not formally the same dataset. But it is the same
-reconstruction problem at the same address and it matches what the device already showed. Do
-not spend more time on ghosting here — **the cutout is the only occlusion mechanism that will
-ever work at this site**.
-
-Reproducing it (installing `streetlevel` is the fiddly part — `pyfrpc`, a Mapy.cz dep, needs a
-C toolchain, and pip's SSL trust is broken on this machine):
-
-```bash
-pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --no-deps streetlevel
-pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org \
-    pyproj requests aiohttp pillow numpy bd09convertor CoordinatesConverter pyexiv2
-```
-
-`p.depth` only exposes the resolved per-pixel distance; the planes come from the internals:
-
-```python
-from streetlevel.streetview import api, depth as dpt
-resp = api.find_panorama_by_id(PANOID, download_depth=True)
-b64  = resp[1][0][5][0][5][1][2]          # longest base64 blob in the response
-raw  = dpt.decode_b64(b64); h = dpt.parse_header(raw)
-pl   = dpt.parse_planes(h, raw)           # {"planes": [{"n","d"}], "indices": [512*256]}
-# a plane is a WALL when abs(n[2]) < 0.4, ground when abs(n[2]) > 0.85
-```
-
-Depth-map column ↔ true bearing, needed to aim at a surveyed coordinate. Column 0 is
-`pano.heading + 180`, i.e. the **image centre is the heading**:
-
-```python
-bearing = (degrees(pano.heading) + 180 + (col + 0.5) / 512 * 360) % 360
-```
+Evidence tables, the caveat that Streetscape Geometry is not formally the same dataset, and
+the `streetlevel` reproduction recipe: **`google-3d-coverage` skill**.
 
 ## The desk simulator — built 2026-08-22, and REMOVED the same day
 
-A full Cesium-backed simulator was built and then deleted. It is written up here so nobody
-builds it a second time expecting a different answer.
+A full Cesium-backed simulator was built and deleted the same day. It **settled the
+arithmetic** — derived frame skew 0.0000, the anchor within 10 cm of the E/N offsets computed
+by hand, `fitMetres` sizing and the 9.57° heading confirmed through ARCore's EUS convention
+end to end — and was then useless for the only question that matters, because **Google's 3D
+tiles have a DETAIL HOLE at this junction**: 190 m tiles at the site, 23.7 m tiles 424 m away,
+same key and same Play session. That is the same hole, at the same address, as the Street View
+finding above. **Do not build it again**, and note that ARCore's Geospatial Creator cannot work
+on Unity 6.5 at all.
 
-**What it was.** `SiteSim.unity`, generated from an Editor menu item, standing you at
-32.083775, 34.815095 inside Google's photorealistic 3D tiles with the real app running behind
-an `IEarthSource` seam — `ArCoreEarthSource` on device, a Cesium-backed `SimEarthSource` at the
-desk that faked VPS accuracies and resolved the terrain anchor by raycasting Google's tile
-colliders. Everything downstream — the localization gate, footprint heading, `fitMetres`
-sizing, the nudge sliders, coordinate baking, the HUD — ran its real code.
-
-**What it proved, and this part still stands:**
-
-```
-derived frame   north (0,0,1) east (1,0,0) up (0,1,0)   skew 0.0000
-sight line      bearing 142.5° true, 28.6 m away        (matches hand calculation)
-anchor          Unity (17.39, 0.01, -22.64), bearing 9.56°
-                within 10 cm of the E/N offsets computed by hand from the two pins
-model           26.95 x 15.91 x 34.79 m world AABB, base on the ground, x1.8701
-```
-
-That settles the `fitMetres` arithmetic and clears `BuildingPlacement.AnchorRotation`
-(`AngleAxis(180 − heading)`) of any part in the three bad site visits: a surveyed heading of
-9.57° goes through ARCore's EUS convention and comes back out as 9.57° true.
-
-**Why it was removed — Google's 3D tiles have a DETAIL HOLE at this junction.** The tileset
-refuses to refine below roughly 100 m tiles here while serving building-scale geometry a few
-hundred metres away. Measured by moving **only the camera** inside one Play session:
-
-| camera position | altitude | finest tile nearby |
-|---|---|---|
-| the site | 1.6 m | 190 m |
-| the site | 60 m | 190 m |
-| 424 m north-east | 60 m | **23.7 m**, incl. an 11 x 15 x 14 m tile |
-
-Returning to the site reverted it exactly. Ruled out: the API key (same key serves fine tiles
-424 m away), screen-space error (16 → 8 → 4 changed nothing), altitude and fog culling (the
-60 m control), Editor throttling, and network errors (none, ever). At 24 m with SSE 8 Cesium
-would subdivide until geometric error fell under ~0.7 m; a 100 m tile is nowhere near that, so
-it wants to refine and the data is not there.
-
-**This is the same hole, at the same address, as the Street View finding above.** Two
-independent Google datasets, one conclusion: there is no usable 3D reconstruction of this
-building. So the simulator could verify arithmetic, heading, scale and the whole runtime path,
-but never "does the model sit on the real building" — which was the entire reason to build it.
-
-**If it is ever resurrected** (`git log` has everything), the traps that cost the most time:
-
-- `unity.pkg.cesium.com` string-sorts versions, so `dist-tags.latest` reads **1.10.0** while
-  1.25.0 is sitting right there. Only 1.25.0 compiles on Unity 6.5.
-- Cesium 1.25 merged `CesiumRuntime` + `CesiumEditor` into one `CesiumForUnity` assembly, while
-  ARCore Extensions 1.54 still references `CesiumRuntime` and switches its Geospatial Creator
-  on whenever *any* `com.cesium.unity` is installed. Every Geospatial Creator file then fails
-  CS0246 and the Editor cannot enter Play mode. Nothing can move: Cesium below 1.25 will not
-  build on Unity 6.5 and the `arf6` branch head **is** 1.54. The fix was an Editor-only stub
-  assembly named `CesiumRuntime`; type-forwarding does **not** work, because a forward is only
-  followed by an assembly that also references the target (CS1069).
-- **ARCore's Geospatial Creator can never work on this Unity version** regardless, for the same
-  reason: it is pinned to a Cesium API no Unity-6.5-compatible Cesium still has.
-- Cesium's Android native library is a **336 MB unstripped `.so`** against a 50 MB APK, and
-  native plugins ship on platform compatibility, not on whether any code calls them.
-
-The Map Tiles key question is settled and worth keeping: **the `AndroidCloudServicesApiKey`
-already in `ARCoreExtensionsProjectSettings.json` works for Photorealistic 3D Tiles** —
-`https://tile.googleapis.com/v1/3dtiles/root.json?key=…` returns 200. No Cesium ion account is
-needed, and no second key.
-
+The measurements, every ruled-out explanation, and the Cesium 1.25 / ARCore 1.54 version traps:
+**`desk-simulator-postmortem` skill**.
 
 ## Gotchas — all of these cost real time
 
@@ -426,11 +374,52 @@ MeshFilter, so it's one place. **Not done yet.**
 tap that starts and ends between two `Update` calls — about 5 in 6 at 30 fps. Use the
 `Touch.onFingerDown` event.
 
+**Anything placed in AR must hang off a real `ARAnchor`, or it creeps.** `PreviewRoot` was a
+plain `new GameObject(...)`, i.e. fixed in the SESSION's frame — and that frame is not fixed to
+the room. ARCore refines its map continuously, and every correction slides the world under
+anything unanchored; on device it looks like the model inching across the floor. The tell is
+diagnostic, not visual: sample `anchor world pos` from `state.txt` a few seconds apart, and if
+it is byte-identical while the model visibly moves, the app is not the thing moving it.
+`AnchorPreviewRoot()` now creates one via `anchorManager.TryAddAnchorAsync(pose)` and reparents
+with `worldPositionStays: true`. The GPS path never had this problem — it hangs off a resolved
+terrain anchor already.
+
+*And the trap inside the fix:* the preview is a CHILD of that anchor, so destroying the old
+anchor before re-parenting deletes PreviewRoot, the model and the shadow surfaces with it. The
+symptom is a HUD that still says `Loaded (17 renderers)` while nothing renders. Create the new
+anchor, re-parent onto it, and only then destroy the old one.
+
+**The facade was pointing the wrong way: `modelFrontOffsetDeg` is 0 and should be 180.**
+Confirmed in preview on 2026-08-23 — at `rot 0` the near face is a blank wall, at `rot 180` it
+is the portico with the stained-glass window. Both preview and GPS placement apply the same
+offset (`LookRotation(toCamera) * Euler(0, -ModelFrontOffsetDeg, 0)`), so on site this aims the
+facade INTO the building. Fix it in `buildings.json` + `reload` rather than dialling `rot 180`
+by hand, which nobody will remember to re-enter. **Not yet applied.**
+
+**Location off ⇒ no streetscape, and a locked phone ⇒ no AR session.** With location disabled
+the HUD reads `streetscape: 0 meshes` and Earth never tracks. Separately the phone's 10-minute
+screen timeout suspends the session mid-experiment; `adb shell settings put global
+stay_on_while_plugged_in 3` keeps it awake while on USB.
+
 **Preview does not disable Earth.** It only skips *waiting* for localization. Outdoors with
 preview on, VPS may well be tracking and coordinates are saveable.
 
-**Tier C shadow distance is 60 m.** `AdaptiveQuality` drops to it under load, and buildings
-further than that cast no shadow at all.
+**The quality tiers do NOTHING to URP. Measured 2026-08-23.** `QualitySettings.asset` contains
+**zero** `m_RenderPipeline` references, so no quality level is bound to a URP asset and
+`AdaptiveQuality`'s `SetQualityLevel()` switches only *legacy* quality settings — most of which
+URP ignores. `TierA/B/C_RPAsset.asset` are never loaded by anything. The pipeline in force is
+always `GraphicsSettings.m_CustomRenderPipeline` = **`Mobile_RPAsset`**: shadow distance
+**150 m**, **4** cascades, **1024** shadowmap.
+
+Consequences, all of which cost time before this was found:
+- The old note here — "Tier C drops shadow distance to 60 m" — was **wrong**. Nothing drops it.
+- `QualitySettings.shadowDistance` is a legacy value URP does not read. Writing it changes the
+  number `AdaptiveQuality`'s HUD line prints and **nothing on screen**; that is exactly how a
+  cosmetic "preview shadow distance override" looked like it was working.
+- To change shadow settings at runtime you must edit the **active `UniversalRenderPipelineAsset`**
+  (`Mobile_RPAsset`), not `QualitySettings`.
+- Frame-rate tiering is therefore not doing what the HUD claims. Binding the tier assets to the
+  quality levels is a real fix and has never been done.
 
 **`ScreenCapture.CaptureScreenshot` needs a RELATIVE path on Android.** It resolves against
 `persistentDataPath` and silently writes nothing for an absolute one — the first batch of
@@ -489,11 +478,11 @@ anchor, GLB load, camera feed, streetscape streaming (27 meshes: 24 building + 3
 preview mode, floor placement, shadows, the adjustment sliders, save/load, coordinate baking,
 capture, hot-reloadable config.
 
-**Awaiting one rebuild** (as of 2026-08-22) — written but never run on device: midpoint
-anchoring, `fitMetres` depth fitting, device-copy config + `reload`, `occlude`/`cut` toggles,
-occluders defaulting off, and **`RemoteControl`**. Until that build the device runs the old
-code, cannot see a pushed `buildings.json`, and will ignore `command.txt` entirely. The next
-build is the gate on the whole tripod workflow.
+**`RemoteControl` is LIVE on device** (verified 2026-08-23, `[Remote] listening on …`). The
+whole tripod workflow now works: preview, sun, rot, scale, offsets, toggles and `capture` are
+all file pushes. `fitMetres` sizing, device-copy config and midpoint anchoring are all
+confirmed running on device too — the "awaiting one rebuild" note that used to live here was
+stale by at least one build.
 
 Never verified on device: footprint mode landing correctly at the real site, the corrected
 ×1.87 scale, ghost wireframe rendering (and it never will here).
@@ -509,8 +498,32 @@ Open:
   midpoint, anchor within 10 cm of hand-calculated E/N offsets). The visual half was the point
   of the simulator and cannot be answered there — Google has no reconstruction of this
   building — so it needs the tripod.
+- **The model casts no shadow, and the cause is narrowed to two.** `catcher on` paints the
+  catcher **uniformly green** — including directly under the building — which proves the quad
+  draws, sits correctly on the floor, and that the shadow lookup returns "lit" everywhere.
+  Either (a) nothing is being rendered into the main light's shadow map, or (b) the shadow
+  variant of `AR/ShadowCatcher` was stripped from the player build, so `MainLightRealtimeShadow`
+  returns a constant 1.0 and would read green whether or not a shadow exists. **They look
+  identical from a screenshot.** The experiment that separates them: swap `ShadowGround`'s
+  material for a stock URP **Lit** one, whose variants are never stripped — a shadow there means
+  the bug is ours. Already ruled out: light shadow type (soft, strength 1), light culling mask
+  (all layers), `shadowCastingMode` (forced On in `BuildingLoader`), the glTFast graphs
+  (`m_CastShadows: true`, opaque, and glTFast disables only motion-vector/transparent passes),
+  and shadow distance (150 m — see the quality-tier gotcha).
 - Lighting is uncalibrated: `intensityDivisor` is still the untouched 1000 and exposure reads
-  0.00 EV with `driveExposure` on, so `colorAdjustments` may be null on the Volume.
+  0.00 EV with `driveExposure` on. Note the earlier guess that `colorAdjustments` is null looks
+  **wrong** — `SampleSceneProfile` does contain a ColorAdjustments override and the scene does
+  reference it. More likely ARCore supplies no `averageBrightness` in this estimation mode; it
+  reports `estimated lumens: 0`, so `DriveExposure` never runs.
+- Sun direction now follows the room: under forced daylight `LightingController` aims the sun
+  along ARCore's `mainLightDirection` (`matchEstimatedLight`, smoothed), instead of the fixed
+  135°/45° synthetic sun. Verified on device — `sun world forward` converges to `estimated dir`
+  exactly. Its COLOUR is still forced pure white while ARCore estimates the room as warm
+  (~1.60, 1.58, 1.41), which is one of the reasons the model reads as pasted on.
+- Grounding: a contact-shadow quad was built and then removed on request. Worth knowing that a
+  real reference object photographed on the carpet showed **no directional cast shadow at all** —
+  just soft contact darkening — because a window is a broad source. Matching this room argues
+  for a subtle contact term, not a crisp cast shadow.
 - `AROcclusionManager` / Depth API would occlude cars and people, which streetscape never can.
   Deliberately deferred — every custom shader would need to sample the depth texture.
 - ~~Geospatial Creator / 3D tiles in the Editor~~ — **closed, do not reopen.** Built, measured,
