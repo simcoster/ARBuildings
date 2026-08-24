@@ -1,0 +1,18 @@
+# torch/torchvision must come from the CUDA index, not PyPI (PyPI Windows wheels
+# are CPU-only):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+#
+# This machine runs Norton TLS inspection, so pip needs the local CA bundle:
+#   pip install --cert C:\Users\simco\.certs\ca-bundle-with-norton.pem ...
+# (PIP_CERT / REQUESTS_CA_BUNDLE / SSL_CERT_FILE are set at user scope and apply
+# to any terminal opened after 2026-08-20.)
+
+torch
+torchvision
+transformers>=4.49      # SigLIP2 support
+timm>=1.0
+onnx
+onnxruntime-gpu         # onnxruntime (CPU-only) also works, minus onnx-cuda
+open_clip_torch         # optional — only for mobileclip-s0
+pillow
+numpy

@@ -1,0 +1,5 @@
+onnx/
+*.onnx
+results*.json
+__pycache__/
+iso_*.json

@@ -56,3 +56,29 @@ crashlytics-build.properties
 # OS
 .DS_Store
 Thumbs.db
+
+# Unity build byproducts (large, regenerated every build)
+/.utmp/
+/*_BurstDebugInformation_DoNotShip/
+/*_BackUpThisFolder_ButDontShipItWithYourGame/
+
+# Source art: originals kept out of the build and out of git
+/ModelSource/
+/tools/encoder_bench/android
+
+# Generated per build by BuildStampProcessor — changes on every build, never worth a diff
+/Assets/Resources/BuildStamp.txt
+/Assets/Resources/BuildStamp.txt.meta
+
+# Unity scratch: recovery scraps, generated solution, and EDM leftovers
+/Assets/_Recovery/
+/Assets/_Recovery.meta
+/*.slnx
+*.json_old
+
+# Claude Code local machine settings (skills under .claude/skills ARE tracked)
+/.claude/settings.local.json
+
+# AR Foundation XR Simulation scratch copies
+/Assets/XR/Temp/
+/Assets/XR/Temp.meta

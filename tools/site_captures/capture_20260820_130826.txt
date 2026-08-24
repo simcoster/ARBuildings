@@ -1,0 +1,89 @@
+AR_Buildings capture 20260820_130826
+============================================================
+
+--- DEVICE --------------------------------------------------
+model              : samsung SM-A356E
+os                 : Android OS 16 / API-36 (BP4A.251205.006/A356EXXSADZG2)
+graphics           : Mali-G68 (OpenGLES3)
+memory             : 5425 MB, 8 cores
+screen             : 1080x2340
+quality level      : 2 (Tier C)
+target frame rate  : 30
+unity              : 6000.5.7f1
+
+--- PLACEMENT -----------------------------------------------
+site id            : synagogue-01
+phase              : Placed
+readout            : anchor resolved
+configured lat/lng : 32.0837890, 34.8145810
+altitude above ter : 0
+location service   : Running
+earth state        : Enabled
+earth tracking     : Tracking
+camera lat/lng     : 32.0838070, 34.8150179
+camera altitude    : 50.44 m
+camera heading     : 80.6 deg
+horiz accuracy     : 0.69 m (gate 5)
+yaw accuracy       : 1.5 deg (gate 15)
+can save coords    : GPS ±0.7 m — ready
+preview active     : False
+anchor world pos   : (1.49, 0.59, 38.69)
+anchor distance    : 36.0 m
+
+--- HEADING / FOOTPRINT -------------------------------------
+heading 9.6° (from A→B)
+facade 16.7 m
+model front offset : 0 deg
+footprint mode     : True
+footprint length   : 16.72 m
+effective heading  : 9.57 deg
+
+--- MODEL ---------------------------------------------------
+model file         : synagogue.glb
+load state         : Loaded (17 renderers)
+renderers          : 17
+size mode          : FootprintWidth (axis Z, target 10 m)
+applied scale      : x1.8701
+recenter on anchor : True
+model height       : 15.91 m (alignment-root metres)
+world bounds@load  : 37.6 x 15.9 x 35.5 m
+
+--- ADJUSTMENT ----------------------------------------------
+adjust site        : synagogue-01
+adjust rot         : 0.00 deg
+adjust scale       : 1.000x
+adjust E / N / up  : 0.00 / 0.00 / 0.00 m
+baked coordinates  : none
+unsaved changes    : False
+last save message  : 
+adjustments file   : /storage/emulated/0/Android/data/com.pavel.arbuildings/files/adjustments.json
+
+--- OCCLUSION -----------------------------------------------
+streetscape meshes : 40
+by type            : building=36 terrain=4 other=0 unresolved=0
+ghosted meshes     : 0  (only possible where a Building mesh exists)
+occluder cutout    : on, 29.6 x 18.7 x 39.1 m
+ghosting enabled   : True
+target anchor set  : True
+visualise meshes   : False
+materials          : occluder=True ghost=True debug=True
+
+--- LIGHTING ------------------------------------------------
+sun computed az/el : 196.8 / 69.5 deg
+north offset       : 0.0 deg (GUESSED - shadows meaningless)
+forced daylight    : False
+sun light          : enabled=True intensity=2.00 colour=RGBA(1.783, 1.915, 1.905, 1.000)
+sun world forward  : (0.10, -0.94, 0.33)
+estimation mode    : AmbientSphericalHarmonics, MainLightDirection, MainLightIntensity
+estimated dir      : (-0.78, -0.63, 0.00)
+estimated lumens   : 0
+estimated colour   : RGBA(1.783, 1.915, 1.905, 1.000)
+ambient lobes      : 2 (directionality 1.47x)
+exposure           : 0.00 EV (driven True)
+intensity divisor  : 1000
+
+--- CAMERA --------------------------------------------------
+position           : (-1.18, 1.79, 2.82)
+euler              : (353.03, 309.46, 1.78)
+fov / near / far   : 68.2 / 0.1 / 1000
+
