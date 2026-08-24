@@ -11,6 +11,13 @@ which is kept as a record so it is not attempted twice. **The phone is the only 
 answer whether the model lands on the building**, so the tooling now aims at making a tripod
 session cheap: see [Driving it from the laptop](#driving-it-from-the-laptop--remotecontrol).
 
+**Where the project is, 2026-08-24:** the model lands on the real building and looks decent, so
+the work has moved from "does it place at all" to realism — exact silhouette, then depth-based
+occlusion, reflections, lighting and ground shadow, in that order. Streetscape occlusion is
+**cancelled**. Depth occlusion (`depth on|off`) already exists and is **off** on the A35
+because it caused the flicker; it is wanted for pedestrians and cars, especially on LiDAR.
+See [Next up](#next-up--realism-in-this-order).
+
 Working branch `geospatial-bringup`. `main` is still the initial commit.
 
 ---
@@ -164,6 +171,7 @@ BuildingAnchor / PreviewRoot / DebugAnchor   the thing we anchor to; ARCore owns
 | `DebugHud` | IMGUI instrument panel. No Canvas, no wiring, can't be broken by scene edits |
 | `LightingController` | sun position, light estimation, north alignment, forced daylight |
 | `StreetscapeShadowSetup` | streetscape geometry → occluder / debug materials, occluder cutout, master occlusion switch |
+| `DepthOcclusion` | ARCore environment-depth switch (`depth on\|off`). Off by default — it was the flicker |
 | `DebugCapture` | `capture` button: screenshot + full state dump to `persistentDataPath/captures` |
 | `AdaptiveQuality` | frame-time tiering, switches URP asset between Tier A/B/C |
 | `RemoteControl` | polls `command.txt` so the app can be nudged over adb without touching the phone |
@@ -236,30 +244,46 @@ adb pull /sdcard/Android/data/com.pavel.arbuildings/files/captures/
 
 ---
 
-## Occlusion — currently OFF by default
+## Streetscape occlusion — CANCELLED, decided 2026-08-24
 
-**There are TWO independent occluders, and for a whole site session only one of them was
-known about.** `occlude` controls streetscape geometry. `depth` controls ARCore's depth map,
-which reaches the depth buffer without any of our code or shaders being involved — see
-[Depth occlusion](#depth-occlusion--the-second-invisible-occluder). Every "occlusion is off"
-measurement taken before 2026-08-23 evening only ever measured the first one.
+**Careful with the word "occlusion" in this project — it means two different things and only
+one of them is wanted.** *Streetscape* occlusion (this section: hiding the model behind
+ARCore's reconstruction of the static world) is **cancelled**. *Depth-based* occlusion (hiding
+it behind pedestrians, cars and anything else that actually walks in front of the camera) is
+wanted, is item 2 of [Next up](#next-up--realism-in-this-order), and already has a switch —
+`depth on|off` — see [Depth occlusion](#depth-occlusion--the-second-invisible-occluder).
+They share nothing but the name: different data source, different shaders, different failure
+modes. For a whole site session only streetscape was known about; every "occlusion is off"
+measurement taken before 2026-08-23 evening only ever measured that one.
 
-`occludersEnabled` defaults to **false**. With it off nothing real can hide the model, which
-separates "the model is in the wrong place" from "the model is behind something" — the single
-most useful diagnostic on site. **Shadows are unaffected**: the master switch only kills the
-depth-only occluder pass, so terrain still catches the model's shadow and neighbours still
-shade it. Toggle with `occlude` in the HUD.
+Why streetscape occlusion is cancelled: at this site the only occluders ARCore can offer are
+its terrain slab and buildings 65–84 m away, because **Google has no reconstruction of this
+building at all** (proven twice over, below). The slab was swallowing whole sections of the
+model, and while it was on there was no way to tell "the model is in the wrong place" from "the
+model is behind something" — which is the one question a site visit exists to answer. It
+removed more realism than it added.
 
-Why off: ARCore has no mesh for the synagogue itself (proven below), so occlusion here can
-only come from the terrain and the neighbouring buildings, and both removed chunks of the
-model faster than they added realism.
+The machinery below is left intact and one `occlude on` away, because it is not wrong, just
+useless *here*. Point the app at an address Google has actually reconstructed and it becomes
+worth switching back on.
+
+`occludersEnabled` defaults to **false**, and the switch disables the streetscape **renderers**
+rather than setting a shader global — two of the three passes in
+`AR/StreetscapeOccluderShadow` never tested the global, so the old shader-flag version was a
+no-op while the HUD cheerfully reported `OCC OFF`. Toggle with `occlude` in the HUD or over the
+remote.
+
+The accepted trade: with the renderers off, **terrain no longer catches the model's shadow
+either**. That is part of why ground shadow is its own item on the list.
 
 Three mechanisms exist, in decreasing usefulness at this site:
 
-**The master switch** (`_OccludersDisabled` global) makes the occluder pass discard
-everything. The flag is **inverted deliberately** — an unset Unity global reads as 0, and 0
-must mean "occluders behave normally", or occlusion would switch itself off wherever the
-driving component has not run.
+**The master switch** disables the renderers (see above). The `_OccludersDisabled` global is
+still published for the shader's benefit, and is **inverted deliberately** — an unset Unity
+global reads as 0, and 0 must mean "occluders behave normally", or occlusion would switch
+itself off wherever the driving component has not run. Do not go back to relying on the global
+alone: it only guards the `Occluder` pass, so `ShadowReceive` keeps painting the mesh and
+`ShadowCaster` keeps writing the shadow map.
 
 **The cutout** builds an oriented world-space box from `BuildingLoader.LocalBounds` (plus
 margin and padding) in `StreetscapeShadowSetup.LateUpdate`, publishes it as
@@ -269,6 +293,11 @@ anchor moves on re-localization. Padding goes sideways and **up, never down** pa
 or the terrain stops receiving shadow in a skirt around the building and the model's shadow
 looks detached. Caveat: the box is sized from the model, so an oversized model makes an
 oversized box that switches off legitimate occlusion from the **neighbours**.
+
+*Known bug, to fix before occlusion is trusted again:* the cutout has been seen **clipping the
+model itself**, which it must never do — it exists to carve occluders — and it still had a
+visible effect with occluders fully disabled. The scene ships `cutoutEnabled: 1` alongside
+`occludersEnabled: 0`, so that combination is the default state, not an exotic one.
 
 **Ghosting** swaps one streetscape mesh to `AR/GhostWireframe`. Needs a `Building` mesh for
 the target — which does not exist here. `pick`/tap-to-select was removed along with its
@@ -449,12 +478,14 @@ anchor before re-parenting deletes PreviewRoot, the model and the shadow surface
 symptom is a HUD that still says `Loaded (17 renderers)` while nothing renders. Create the new
 anchor, re-parent onto it, and only then destroy the old one.
 
-**The facade was pointing the wrong way: `modelFrontOffsetDeg` is 0 and should be 180.**
-Confirmed in preview on 2026-08-23 — at `rot 0` the near face is a blank wall, at `rot 180` it
-is the portico with the stained-glass window. Both preview and GPS placement apply the same
-offset (`LookRotation(toCamera) * Euler(0, -ModelFrontOffsetDeg, 0)`), so on site this aims the
-facade INTO the building. Fix it in `buildings.json` + `reload` rather than dialling `rot 180`
-by hand, which nobody will remember to re-enter. **Not yet applied.**
+**A recentring pin on the wrong bound extrudes the model to the wrong side of the anchor.**
+`BuildingLoader.RecenterOnAnchor` pinned `local.max.z` to the anchor, and this model's facade
+is its **−Z** extreme, so the BACK sat on the surveyed midpoint and all 33.4 m of depth was
+extruded across the plaza toward the viewer — at scale 1 the camera ended up inside the
+building, which reads as a placement or heading error and is neither. Pinning `local.min.z`
+fixed it; the recentring log moved from `-72.54` to `-39.14`, exactly 33.4 m. Which bound to
+pin depends on which way the model's facade faces in its own local space, so check that before
+touching heading. Full account in `docs/2026-08-23-first-site-session.md`.
 
 **Location off ⇒ no streetscape, and a locked phone ⇒ no AR session.** With location disabled
 the HUD reads `streetscape: 0 meshes` and Earth never tracks. Separately the phone's 10-minute
@@ -535,8 +566,8 @@ whenever the package re-resolves.
 
 Works on device: VPS localization (routinely **±0.6–1.4 m, yaw ±1.6–2°** at this site), terrain
 anchor, GLB load, camera feed, streetscape streaming (27 meshes: 24 building + 3 terrain),
-preview mode, floor placement, shadows, the adjustment sliders, save/load, coordinate baking,
-capture, hot-reloadable config.
+preview mode, floor placement, the adjustment sliders, save/load, coordinate baking, capture,
+hot-reloadable config. Shadows are **not** in that list — see the ground-shadow item below.
 
 **`RemoteControl` is LIVE on device** (verified 2026-08-23, `[Remote] listening on …`). The
 whole tripod workflow now works: preview, sun, rot, scale, offsets, toggles and `capture` are
@@ -544,15 +575,19 @@ all file pushes. `fitMetres` sizing, device-copy config and midpoint anchoring a
 confirmed running on device too — the "awaiting one rebuild" note that used to live here was
 stale by at least one build.
 
-Never verified on device: footprint mode landing correctly at the real site, the corrected
-×1.87 scale, ghost wireframe rendering (and it never will here).
+**Placement looks decent on device, as of 2026-08-24.** With streetscape occluders cancelled
+and the extrusion side fixed, the model lands on the real building at roughly the right size,
+orientation and position — good enough that the project is no longer about "does it land at
+all" and is now about polish. Read that as an eyeball judgement, not a measurement: it is
+"decent", not "exact", and nothing in this claim is backed by a numeric residual.
 
-**The next session is a tripod session**: phone fixed and pointed at the facade, laptop on
-adb, no hands on the device. Screenshots via `adb exec-out screencap`, state via
-`adb pull state.txt`, adjustments via `adb push command.txt`. Bring the phone up, confirm
-`[Remote] listening on …` in logcat, then work in nudges.
+Never verified on device: ghost wireframe rendering (and it never will here — Google has no
+building geometry at this address).
 
-### Where the last session left off — 2026-08-23 evening
+**Tripod discipline still applies**: phone fixed and pointed at the facade, laptop on adb, no
+hands on the device. Screenshots via `adb exec-out screencap`, state via `adb pull state.txt`,
+adjustments via `adb push command.txt`. Bring the phone up, confirm `[Remote] listening on …`
+in logcat, then work in nudges.
 
 The **flicker is fixed** (build stamp `2026-08-23 19:58:05`): it was ARCore's depth map being
 written into the depth buffer by the camera background pass, and `depth off` is now the
@@ -568,15 +603,110 @@ Two things to do **before** trusting any placement reading next time:
 2. **Check `depth current : Disabled`** in the state dump, not `depth requested` — the first
    is the subsystem agreeing, the second is only what was asked for.
 
-Uncommitted at the end of the session: `DepthOcclusion.cs`, the `depth` command in
-`RemoteControl`, the depth section in `DebugCapture`, and these docs.
+### Next up — realism, in this order
 
-Open:
-- **Verify the placement prediction on the phone.** The arithmetic half is settled
-  (×1.8701 → 24.66 × 15.91 × 33.40 m, front face at 9.57° true, anchored at the facade
-  midpoint, anchor within 10 cm of hand-calculated E/N offsets). The visual half was the point
-  of the simulator and cannot be answered there — Google has no reconstruction of this
-  building — so it needs the tripod.
+The order is not arbitrary. Every item is judged **by eye against the real facade**, so a model
+that is still a metre out or an occluder that eats a wall makes all the later items
+unreadable. Do not start two of these at once.
+
+1. **Position it exactly. The test: no part of the real building shows.** Right now the real
+   building is still visible behind the model — a sliver of facade or roofline peeking past an
+   edge — and that is the most damning tell in the whole app, worse than bad lighting, because
+   it reads instantly as two images pasted together. The model's silhouette has to cover the
+   real one from the tripod viewpoint, which means position *and* scale, not just position.
+   Nudge over `RemoteControl` (`rot` `scale` `scalev` `east` `north` `up`), then `save` so the
+   coordinates get baked and the fix survives a restart. Remember `east`/`north` are Unity
+   world axes, not compass directions.
+2. **Depth-based occlusion — pedestrians and cars.** This is what "occlusion" means from here
+   on; the streetscape kind is cancelled (see that section). The switch already exists:
+   `DepthOcclusion`, **off by default**, `depth on|off` over the remote. It does **not** need
+   our shaders to sample a depth texture — `ARCoreBackground` writes ARCore's depth into the
+   depth buffer and every opaque object is tested against it. On the A35 that is why it was
+   the flicker, and why it stays off until placement is exact. Three things worth knowing:
+   - **The A35 is on Google's supported list, explicitly "Supports Depth API"**, and no ToF
+     sensor is needed — it is depth-from-motion.
+   - **The accuracy band is on our side for once.** Depth is quoted usable 0–65 m but most
+     accurate **0.5–5 m**. The model sits ~28 m away where depth is poor (and on this phone
+     the depth pipeline also fails ~10×/s — see the depth section), but pedestrians and cars
+     are in the near band. We need depth for the near things, not the far ones.
+   - **The tripod is the adversary here.** Depth-from-motion wants the device to move, and our
+     entire workflow is a phone bolted to a tripod. ARCore claims ML fill-in with minimal
+     motion, but expect the static case to be the weak one, and test it *on the tripod* rather
+     than hand-held, or the result will not mean anything. This is also the strongest argument
+     for the detector in item 7, and for turning `depth` **on** on LiDAR hardware (the iPad
+     target below).
+
+   AR Foundation's people-occlusion segmentation is **ARKit-only** — on Android there is no
+   built-in human segmentation, which is why item 7 exists at all.
+3. **Reflections. Nothing exists yet.** The only environment source in the scene is ARCore's
+   ambient spherical harmonics written into `RenderSettings.ambientProbe`, so anything glossy
+   on the model has flat ambient to mirror and nothing else. There is **no reflection probe in
+   the scene at all**. The mechanism to look at is a probe fed from the camera feed, or a
+   cubemap baked from it.
+4. **Realistic lighting.** The calibration work below (exposure, sun colour) is this item; it
+   is written up in detail because each part has already been narrowed down once.
+5. **Artificial lighting — multiple sources, not just the sun.** The scene contains **exactly
+   one light**, a directional, and `LightingController` only ever drives that one. Everything
+   else on screen is ambient. Streetlights, the building's own facade lighting and interior
+   glow through the windows are all unrepresented, which is most of why it reads flat after
+   dark. Note the shadow budget: `Mobile_RPAsset` is what is actually in force (see the
+   quality-tier gotcha), so additional shadow-casting lights are not free.
+6. **Ground shadow.** The model casts none today — two candidate causes, both below — and with
+   streetscape renderers off the terrain cannot receive one either. Read the grounding bullet
+   below before rebuilding a contact-shadow quad; one was built and removed already.
+
+### Bigger ideas — wanted, not yet costed
+
+Both of these are research, not tasks. They are written down with what is already known against
+them so the research does not start from zero.
+
+7. **An on-device detection model to help occlusion — bounding boxes around people and cars.**
+   The motivation is sound and it pairs with item 2: a detector supplies "there is a person
+   here, in front of the building" in exactly the cases depth-from-motion is weakest (a static
+   tripod), and it supplies *semantics*, so we can decide what is allowed to occlude rather
+   than trusting every noisy depth pixel. Two design cautions and one hard blocker:
+   - **A box is a rectangle, and a rectangular hole in a building looks worse than no hole.**
+     Boxes are good for gating, weighting or sanity-checking depth. For the actual cutout edge,
+     a **segmentation mask** is what reads as real. Plan for boxes to steer depth, not to
+     replace it.
+   - **"Runs on the NPU" is not currently reachable from Unity.** Unity's inference package
+     (`com.unity.ai.inference`, formerly Sentis) offers **CPU (Burst), GPUCompute and GPUPixel
+     backends only — there is no NPU backend**. Unity staff called NPU support an "active area
+     of development" in January 2026 and still gave no timeline in March 2026. So today a Unity
+     model runs on the GPU, competing with rendering, on a phone already inside a frame budget.
+   - **And on this specific phone there is no NPU path at all.** The route to a real NPU on
+     Android is now LiteRT with a vendor delegate (NNAPI was deprecated in Android 15), which
+     means a native Android plugin, not C#. But LiteRT's Samsung backend — Exynos AI LiteCore —
+     supports **only the Exynos 2500 and 2600**, and the A35 is an **Exynos 1380**. Samsung's
+     own Neural SDK is **no longer distributed to third parties** and `Samsung/ENNDelegate` is
+     effectively abandoned for outside developers. **Conclusion: NPU inference is not available
+     on the test device, by any route.** Prototype against the GPU backend, and treat NPU as a
+     reason to pick a different test phone (a Snapdragon with Hexagon, or a MediaTek with
+     NeuroPilot) rather than as something to be unblocked in code.
+8. **Fusing views from several devices watching the same building.** Several phones on the same
+   facade from different angles, sharing what each one can see: a device with LiDAR meshes the
+   facade and hands the mesh to weaker devices, which get geometry they could never compute.
+   Why this is more promising here than it sounds:
+   - **The hard part of multi-device AR is already solved for us.** Agreeing on a common frame
+     normally needs Cloud Anchors; the Geospatial API hands every device lat/lng/alt + heading
+     in a *global* frame directly, and VPS at this site is ±0.6–1.4 m with yaw ±1.6–2°. Two
+     devices can therefore agree on where the building is without ever talking to each other
+     first. `AREarthManager.Convert()` is the bridge in both directions.
+   - **A shared LiDAR mesh would fix the one thing that is otherwise unfixable at this
+     address.** Google has no reconstruction of this building, which is what killed streetscape
+     occlusion, ghosting and the desk simulator. A scan from a device that *can* mesh it is the
+     only realistic way to obtain that geometry — and it would then serve the model's
+     occlusion, its shadows and its reflections at once.
+   - **The donor device is the platform we cannot build yet.** LiDAR on phones means iPhone
+     Pro/iPad Pro, and iOS here needs a Mac or cloud CI, the empty `locationUsageDescription`,
+     and the geometry-shader fix. So step one of this idea is really the iOS bring-up already
+     listed below. An Android donor would have to mesh from depth instead, which is lower
+     quality but needs no new platform.
+   - Unresolved before any of it matters: transport and mesh budget (streetscape alone streams
+     27–40 meshes), who owns the canonical mesh, and how to reconcile two devices that disagree
+     about the facade by a metre.
+
+Open, carried over:
 - **The model casts no shadow, and the cause is narrowed to two.** `catcher on` paints the
   catcher **uniformly green** — including directly under the building — which proves the quad
   draws, sits correctly on the floor, and that the shadow lookup returns "lit" everywhere.
