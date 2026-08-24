@@ -1,9 +1,20 @@
+using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Rendering;
+using UnityEngine.Rendering.Universal;
 
 /// <summary>
 /// Device tiering (Step 13). In AR, frame rate *consistency* matters more than the number —
 /// judder makes the model swim relative to the real world, which destroys registration far
 /// more than low fps does. A locked 30 looks more convincing than a fluctuating 40–55.
+///
+/// Drops immediately when a 5 s window is over budget. Recovers C → B → A only after the
+/// phone has been comfortably under budget for several windows, and not until a hold after
+/// the last drop has elapsed — otherwise heat/cool oscillation flips quality mid-session.
+///
+/// SetQualityLevel alone is not enough: GraphicsSettings keeps Mobile_RPAsset as the default
+/// pipeline, which URP actually renders with. Each apply also assigns that level's
+/// TierA/B/C_RPAsset or the switch is cosmetic (legacy shadowDistance, nothing on screen).
 /// </summary>
 public class AdaptiveQuality : MonoBehaviour
 {
@@ -15,8 +26,19 @@ public class AdaptiveQuality : MonoBehaviour
     [Tooltip("ARCore's initial VPS localization is a genuine spike — don't tier down for it.")]
     [SerializeField] float warmupSeconds = 10f;
 
-    const float Window = 5f;      // seconds per evaluation
-    const float BudgetMs = 36f;   // 30fps + headroom
+    [Tooltip("Average frame time above this, over one window, drops a tier.")]
+    [SerializeField] float dropBudgetMs = 36f;
+
+    [Tooltip("Must sit below this for recoverWindows consecutive windows before climbing.")]
+    [SerializeField] float recoverBudgetMs = 28f;
+
+    [Tooltip("Healthy windows required before a recover. 3 × 5 s = 15 s of headroom.")]
+    [SerializeField] int recoverWindows = 3;
+
+    [Tooltip("After a drop, ignore recoveries for this long. Lets the SoC cool without bouncing.")]
+    [SerializeField] float holdAfterDropSeconds = 30f;
+
+    const float Window = 5f;
     const int LowestTier = 2;
 
     int _tier;
@@ -25,15 +47,20 @@ public class AdaptiveQuality : MonoBehaviour
     float _warmup;
     int _startTier;
     int _drops;
+    int _recovers;
+    int _recoverStreak;
+    float _lastDropAt = -999f;
     float _emaMs;
+    bool _auto = true;
+
+    UniversalRenderPipelineAsset _appliedUrp;
+    RenderPipelineAsset _stockDefaultPipeline;
+    readonly Dictionary<UniversalRenderPipelineAsset, float> _stockShadow =
+        new Dictionary<UniversalRenderPipelineAsset, float>();
 
     public int CurrentTier => _tier;
+    public bool AutoEnabled => _auto;
 
-    /// <summary>
-    /// HUD line. Shows the tier as a letter, the smoothed frame time against the budget
-    /// that drives tiering, and the shadow distance the tier implies — Tier C drops it to
-    /// 60 m, so a building further away silently stops casting and the tier is the reason.
-    /// </summary>
     public string DebugReadout
     {
         get
@@ -41,19 +68,38 @@ public class AdaptiveQuality : MonoBehaviour
             bool warming = _warmup < warmupSeconds;
             string timing = warming
                 ? $"{_emaMs:F1} ms (warmup {warmupSeconds - _warmup:F0}s)"
-                : $"{_emaMs:F1} ms / {BudgetMs:F0} budget";
+                : _auto
+                    ? $"{_emaMs:F1} ms / {dropBudgetMs:F0} drop / {recoverBudgetMs:F0} recover"
+                    : $"{_emaMs:F1} ms";
 
-            string history = _tier == _startTier
-                ? $"start {Letter(_startTier)} ({(startTier >= 0 ? "forced" : "auto")})"
-                : $"from {Letter(_startTier)}, dropped {_drops}x";
-            if (_tier >= LowestTier) history += ", at floor";
+            string history;
+            if (!_auto)
+                history = "FIXED";
+            else if (_tier == _startTier && _drops == 0 && _recovers == 0)
+                history = $"start {Letter(_startTier)} ({(startTier >= 0 ? "forced" : "auto")})";
+            else
+                history = $"from {Letter(_startTier)}, dropped {_drops}x, recovered {_recovers}x";
+            if (_auto && _tier >= LowestTier) history += ", at floor";
+            if (_auto && _tier <= 0 && (_drops > 0 || _recovers > 0)) history += ", at ceiling";
 
-            return $"quality: tier {Letter(_tier)}  {timing}\n" +
-                   $"  shadows {QualitySettings.shadowDistance:F0} m - {history}";
+            var urp = CurrentUrp();
+            string shadows = urp != null
+                ? $"shadows {urp.shadowDistance:F0} m ({urp.name}, {urp.shadowCascadeCount} casc)"
+                : $"shadows {QualitySettings.shadowDistance:F0} m (no URP asset)";
+
+            string mode = _auto ? "AUTO" : "FIXED";
+            return $"quality: {mode} {Letter(_tier)}  {timing}\n" +
+                   $"  {shadows} - {history}";
         }
     }
 
-    static char Letter(int tier) => (char)('A' + tier);
+    /// <summary>Capture / remote dump. Same numbers as the HUD line, plus the hold state.</summary>
+    public string StateReport =>
+        DebugReadout + "\n" +
+        $"  auto {(_auto ? "on" : "OFF (FIXED)")}  quality level {QualitySettings.GetQualityLevel()}\n" +
+        $"  pipeline {(CurrentUrp() != null ? CurrentUrp().name : "(none)")}";
+
+    static char Letter(int tier) => (char)('A' + Mathf.Clamp(tier, 0, 25));
 
     /// <summary>
     /// Shadow distance to hold regardless of tier, in metres. 0 leaves the tier's own value.
@@ -64,6 +110,7 @@ public class AdaptiveQuality : MonoBehaviour
     /// 1-texel normal bias finishes the job, so preview shows no shadow at any sun angle. That
     /// reads as broken lighting rather than as a resolution limit, which is why this exists.
     ///
+    /// Written onto the live URP asset, not QualitySettings.shadowDistance — URP ignores that.
     /// Re-applied after every tier change: a drop mid-session would otherwise silently restore
     /// the 60 m value and take the shadow with it.
     /// </summary>
@@ -75,21 +122,29 @@ public class AdaptiveQuality : MonoBehaviour
 
     float _shadowDistanceOverride;
 
-    void ApplyShadowDistance()
-    {
-        if (_shadowDistanceOverride > 0f)
-            QualitySettings.shadowDistance = _shadowDistanceOverride;
-    }
-
     void Start()
     {
         Application.targetFrameRate = targetFrameRate;
+        _stockDefaultPipeline = GraphicsSettings.defaultRenderPipeline;
 
         _tier = startTier >= 0 ? startTier : GuessTier();
         _tier = Mathf.Clamp(_tier, 0, LowestTier);
         _startTier = _tier;
-        QualitySettings.SetQualityLevel(_tier, true);
-        ApplyShadowDistance();
+        ApplyTier("start");
+    }
+
+    void OnDisable()
+    {
+        // Runtime mutation of a URP asset / GraphicsSettings is visible in the Editor after
+        // Play stops unless we put the stock values back.
+        foreach (var kv in _stockShadow)
+        {
+            if (kv.Key != null)
+                kv.Key.shadowDistance = kv.Value;
+        }
+        if (_stockDefaultPipeline != null)
+            GraphicsSettings.defaultRenderPipeline = _stockDefaultPipeline;
+        _appliedUrp = null;
     }
 
     static int GuessTier()
@@ -117,6 +172,8 @@ public class AdaptiveQuality : MonoBehaviour
             return;
         }
 
+        if (!_auto) return;
+
         _accum += Time.unscaledDeltaTime * 1000f;
         _samples++;
         if (_accum < Window * 1000f) return;
@@ -125,16 +182,103 @@ public class AdaptiveQuality : MonoBehaviour
         _accum = 0f;
         _samples = 0;
 
-        // Step DOWN only. As the phone heats performance degrades; as it cools it recovers,
-        // so a bidirectional controller oscillates. A visible quality flip mid-session is
-        // worse than just running at the lower tier. Pick a floor and stay.
-        if (avgMs > BudgetMs && _tier < LowestTier)
+        if (avgMs > dropBudgetMs && _tier < LowestTier)
         {
+            _recoverStreak = 0;
             _tier++;
             _drops++;
-            QualitySettings.SetQualityLevel(_tier, true);
-            ApplyShadowDistance();
-            Debug.Log($"Dropped to quality tier {_tier} ({Letter(_tier)}) (avg {avgMs:F1} ms)");
+            _lastDropAt = Time.unscaledTime;
+            ApplyTier($"drop avg {avgMs:F1} ms");
+            return;
+        }
+
+        bool cooled = Time.unscaledTime - _lastDropAt >= holdAfterDropSeconds;
+        if (avgMs < recoverBudgetMs && _tier > 0 && cooled)
+        {
+            _recoverStreak++;
+            if (_recoverStreak >= recoverWindows)
+            {
+                _recoverStreak = 0;
+                _tier--;
+                _recovers++;
+                ApplyTier($"recover avg {avgMs:F1} ms");
+            }
+        }
+        else
+        {
+            _recoverStreak = 0;
         }
     }
+
+    /// <summary>
+    /// Pin a tier and stop auto. <c>quality auto</c> turns measurement back on from here.
+    /// </summary>
+    public string ForceTier(int tier)
+    {
+        _auto = false;
+        _recoverStreak = 0;
+        int next = Mathf.Clamp(tier, 0, LowestTier);
+        if (next == _tier)
+        {
+            ApplyTier("force (already there)");
+            return $"held at {Letter(_tier)}";
+        }
+        _tier = next;
+        ApplyTier("force");
+        return $"held at {Letter(_tier)}";
+    }
+
+    public string ResumeAuto()
+    {
+        _auto = true;
+        _recoverStreak = 0;
+        return $"auto on, tier {Letter(_tier)}";
+    }
+
+    void ApplyTier(string reason)
+    {
+        QualitySettings.SetQualityLevel(_tier, true);
+
+        // QualitySettings.customRenderPipeline is bound to TierA/B/C_RPAsset, but the pipeline
+        // URP actually draws with is GraphicsSettings.defaultRenderPipeline, which this project
+        // leaves on Mobile_RPAsset. Assigning both is what makes a recover change shadows.
+        var asset = QualitySettings.GetRenderPipelineAssetAt(_tier);
+        if (asset != null)
+        {
+            QualitySettings.renderPipeline = asset;
+            GraphicsSettings.defaultRenderPipeline = asset;
+        }
+
+        ApplyShadowDistance();
+
+        var urp = CurrentUrp();
+        string pipe = urp != null
+            ? $"{urp.name} shadows {urp.shadowDistance:F0} m casc {urp.shadowCascadeCount}"
+            : "no URP asset";
+        Debug.Log($"[Quality] tier {Letter(_tier)} ({reason}): {pipe}");
+    }
+
+    void ApplyShadowDistance()
+    {
+        var urp = CurrentUrp();
+        if (urp == null) return;
+
+        if (_appliedUrp != null && _appliedUrp != urp &&
+            _stockShadow.TryGetValue(_appliedUrp, out float previousStock))
+            _appliedUrp.shadowDistance = previousStock;
+
+        if (!_stockShadow.ContainsKey(urp))
+            _stockShadow[urp] = urp.shadowDistance;
+
+        urp.shadowDistance = _shadowDistanceOverride > 0f
+            ? _shadowDistanceOverride
+            : _stockShadow[urp];
+        _appliedUrp = urp;
+
+        // Keep the legacy field in step so the HUD number is not a lie if something still reads it.
+        QualitySettings.shadowDistance = urp.shadowDistance;
+    }
+
+    static UniversalRenderPipelineAsset CurrentUrp() =>
+        GraphicsSettings.currentRenderPipeline as UniversalRenderPipelineAsset;
 }

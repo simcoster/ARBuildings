@@ -19,6 +19,7 @@ public class DebugHud : MonoBehaviour
     [SerializeField] BuildingLoader loader;
     [SerializeField] StreetscapeShadowSetup streetscape;
     [SerializeField] AdaptiveQuality quality;
+    [SerializeField] DepthOcclusion depth;
 
     bool _visible = true;
     GUIStyle _label, _button, _box, _sliderTrack, _sliderThumb;
@@ -47,6 +48,7 @@ public class DebugHud : MonoBehaviour
         if (loader == null) loader = FindAnyObjectByType<BuildingLoader>();
         if (streetscape == null) streetscape = FindAnyObjectByType<StreetscapeShadowSetup>();
         if (quality == null) quality = FindAnyObjectByType<AdaptiveQuality>();
+        if (depth == null) depth = FindAnyObjectByType<DepthOcclusion>();
     }
 
     // AlignmentNudge enables this too; the support is reference-counted, so both can.
@@ -229,7 +231,9 @@ public class DebugHud : MonoBehaviour
         if (lighting != null) text += lighting.DebugReadout;
 
         float boxW = w * 0.7f;
-        float boxH = Screen.height * 0.46f;
+        // Leave a row under the box for AUTO/A/B/C so those buttons are not fighting
+        // preview / place-on-floor, and so the info text is not the only quality control.
+        float boxH = Screen.height * 0.38f;
 
         var prev = GUI.color;
         GUI.color = new Color(0f, 0f, 0f, 0.55f);
@@ -237,6 +241,9 @@ public class DebugHud : MonoBehaviour
         GUI.color = prev;
 
         GUI.Label(new Rect(pad * 1.5f, pad * 1.5f, boxW - pad, boxH - pad), text, _label);
+
+        float qualityY = pad + boxH + pad * 0.15f;
+        DrawQualityControls(w, pad, btnH, qualityY);
 
         // --- mesh visualisation toggle ---
         if (streetscape != null &&
@@ -272,6 +279,21 @@ public class DebugHud : MonoBehaviour
             GUI.backgroundColor = occBg;
         }
 
+        // --- environment depth: the other occluder, the one that can put a person or a
+        // motorcycle in front of the model. Off by default; ON is the unusual state.
+        if (depth == null) depth = FindAnyObjectByType<DepthOcclusion>();
+        if (depth != null)
+        {
+            var depBg = GUI.backgroundColor;
+            if (depth.Enabled) GUI.backgroundColor = Color.cyan;
+
+            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 8.4f, w * 0.22f, btnH),
+                           depth.Enabled ? "depth ON" : "depth", _button))
+                depth.Enabled = !depth.Enabled;
+
+            GUI.backgroundColor = depBg;
+        }
+
         // --- cutout on/off, to compare against the real world without a rebuild ---
         if (streetscape != null)
         {
@@ -301,7 +323,8 @@ public class DebugHud : MonoBehaviour
             GUI.Label(new Rect(w - pad - w * 0.42f, pad + btnH * 7.1f, w * 0.4f, btnH),
                       _captureResult, _label);
 
-        DrawPreviewControls(w, pad, btnH);
+        float previewY = qualityY + btnH * 1.25f;
+        DrawPreviewControls(w, pad, btnH, previewY);
 
         if (nudge == null) return;
 
@@ -315,11 +338,13 @@ public class DebugHud : MonoBehaviour
     void DrawAdjustControls(float w, float pad, float btnH)
     {
         // Not Enum.GetValues: the row is 5 buttons with the aspect lock on and 6 with it off,
-        // and the nudge owns which.
+        // and the nudge owns which. Aspect is an extra cell on this same row — it used to sit
+        // on the value-label line at x=0.6w, which landed on Y and up.
         var parameters = nudge.ActiveParams;
+        int cells = parameters.Length + 1;
 
         float rowY = Screen.height - pad - btnH * 4.6f;
-        float cellW = (w - pad * 2f - pad * 0.4f * (parameters.Length - 1)) / parameters.Length;
+        float cellW = (w - pad * 2f - pad * 0.4f * (cells - 1)) / cells;
 
         // --- which value the slider edits ---
         for (int i = 0; i < parameters.Length; i++)
@@ -335,6 +360,18 @@ public class DebugHud : MonoBehaviour
             GUI.backgroundColor = prevBg;
         }
 
+        bool locked = nudge.Current.keepAspect;
+        var prevAspectBg = GUI.backgroundColor;
+        if (locked) GUI.backgroundColor = Color.cyan;
+        else GUI.backgroundColor = Color.yellow;
+
+        float aspectX = pad + parameters.Length * (cellW + pad * 0.4f);
+        if (GUI.Button(new Rect(aspectX, rowY, cellW, btnH),
+                       locked ? "LOCK" : "FREE", _button))
+            nudge.SetKeepAspect(!locked);
+
+        GUI.backgroundColor = prevAspectBg;
+
         // --- the slider ---
         var selected = nudge.Selected;
         AlignmentNudge.RangeOf(selected, out float min, out float max, out bool logarithmic);
@@ -342,20 +379,8 @@ public class DebugHud : MonoBehaviour
         float value = nudge.GetValue(selected);
         float sliderY = rowY + btnH * 1.5f;
 
-        GUI.Label(new Rect(pad, sliderY - btnH * 0.9f, w * 0.58f, btnH),
+        GUI.Label(new Rect(pad, sliderY - btnH * 0.9f, aspectX - pad * 1.2f, btnH),
                   $"{nudge.LabelOf(selected)}: {nudge.ValueText(selected)}", _label);
-
-        // Aspect lock rides on the value-label row — the only free width left down here, and it
-        // belongs next to the scale it governs rather than in the right-hand column.
-        bool locked = nudge.Current.keepAspect;
-        var prevAspectBg = GUI.backgroundColor;
-        if (!locked) GUI.backgroundColor = Color.yellow;
-
-        if (GUI.Button(new Rect(w * 0.6f, sliderY - btnH * 0.95f, w * 0.4f - pad, btnH * 0.9f),
-                       locked ? "aspect LOCK" : "aspect FREE", _button))
-            nudge.SetKeepAspect(!locked);
-
-        GUI.backgroundColor = prevAspectBg;
 
         float t = AlignmentNudge.ToSlider(value, min, max, logarithmic);
 
@@ -417,18 +442,50 @@ public class DebugHud : MonoBehaviour
     }
 
     /// <summary>
+    /// AUTO keeps measuring and may drop/recover. A/B/C pins that tier and stops measuring.
+    /// Stops short of the right-hand column so it never sits under hide/mesh/reload.
+    /// </summary>
+    void DrawQualityControls(float w, float pad, float btnH, float y)
+    {
+        if (quality == null) return;
+
+        float gap = pad * 0.3f;
+        float rowW = w - pad * 2f - w * 0.22f - pad;
+        float cellW = (rowW - gap * 3f) / 4f;
+
+        var prevBg = GUI.backgroundColor;
+        bool auto = quality.AutoEnabled;
+
+        if (auto) GUI.backgroundColor = Color.cyan;
+        if (GUI.Button(new Rect(pad, y, cellW, btnH), "AUTO", _button))
+            quality.ResumeAuto();
+        GUI.backgroundColor = prevBg;
+
+        for (int i = 0; i < 3; i++)
+        {
+            bool here = quality.CurrentTier == i;
+            if (here)
+                GUI.backgroundColor = auto ? new Color(0.45f, 0.75f, 0.8f) : Color.cyan;
+
+            char letter = (char)('A' + i);
+            if (GUI.Button(new Rect(pad + (i + 1) * (cellW + gap), y, cellW, btnH),
+                           letter.ToString(), _button))
+                quality.ForceTier(i);
+
+            GUI.backgroundColor = prevBg;
+        }
+    }
+
+    /// <summary>
     /// Preview mode: a scale model in the room with you, sized as if you were standing
     /// however far away the slider says. Lives on the left, clear of the height slider.
     /// </summary>
-    void DrawPreviewControls(float w, float pad, float btnH)
+    void DrawPreviewControls(float w, float pad, float btnH, float y)
     {
         if (geospatial == null) return;
 
         bool active = geospatial.PreviewActive;
 
-        // Sits between the info box (top 46%) and the edit-mode row (~84%). The block is
-        // four rows tall when preview is on, so it starts high enough to clear both.
-        float y = Screen.height * 0.54f;
         float btnW = w * 0.3f;
 
         var prevBg = GUI.backgroundColor;

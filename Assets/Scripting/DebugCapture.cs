@@ -86,6 +86,9 @@ public static class DebugCapture
             $"target frame rate  : {Application.targetFrameRate}\n" +
             $"unity              : {Application.unityVersion}\n");
 
+        var quality = UnityEngine.Object.FindAnyObjectByType<AdaptiveQuality>();
+        Section(text, "QUALITY", quality != null ? quality.StateReport : "no AdaptiveQuality");
+
         Section(text, "PLACEMENT", geospatial != null ? geospatial.StateReport : "no controller");
 
         if (placement != null)

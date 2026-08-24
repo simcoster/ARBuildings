@@ -25,6 +25,7 @@ using UnityEngine;
 ///     save            reset          clear           reload
 ///     preview on      occlude off    cut on          mesh off    sun on   aspect on
 ///     depth off       real-world DEPTH occlusion — a different occluder from `occlude`
+///     quality a|b|c   pin a tier (auto off). quality auto resumes. quality + / - nudge
 ///     recenter        capture        state
 ///
 /// Every run also drops <see cref="StateFileName"/> next to it, so the current numbers can be
@@ -54,6 +55,7 @@ public class RemoteControl : MonoBehaviour
     [SerializeField] BuildingLoader loader;
     [SerializeField] StreetscapeShadowSetup streetscape;
     [SerializeField] DepthOcclusion depth;
+    [SerializeField] AdaptiveQuality quality;
 
     float _pollTimer;
     float _stateTimer;
@@ -77,6 +79,7 @@ public class RemoteControl : MonoBehaviour
         // serialized in the scene.
         if (depth == null) depth = FindAnyObjectByType<DepthOcclusion>();
         if (depth == null) depth = gameObject.AddComponent<DepthOcclusion>();
+        if (quality == null) quality = FindAnyObjectByType<AdaptiveQuality>();
 
         Debug.Log($"[Remote] listening on {CommandPath}");
     }
@@ -254,6 +257,10 @@ public class RemoteControl : MonoBehaviour
                 nudge.SetKeepAspect(OnOff(arg));
                 return $"keep aspect {(OnOff(arg) ? "on" : "off")}";
 
+            case "quality":
+            case "tier":
+                return RunQuality(arg);
+
             case "state":
                 return "state written";
 
@@ -285,6 +292,37 @@ public class RemoteControl : MonoBehaviour
         float applied = nudge.GetValue(param);   // may have been clamped
         return $"{nudge.LabelOf(param)} {before:F3} -> {applied:F3}"
              + (Mathf.Abs(applied - after) > 0.0001f ? " (clamped)" : "");
+    }
+
+    string RunQuality(string arg)
+    {
+        if (quality == null) return "no AdaptiveQuality";
+
+        string a = arg.ToLowerInvariant();
+        switch (a)
+        {
+            case "":
+            case "state":
+                return quality.StateReport.Replace('\n', ' ');
+            case "auto":
+            case "on":
+                return quality.ResumeAuto();
+            case "a":
+            case "0":
+                return quality.ForceTier(0);
+            case "b":
+            case "1":
+                return quality.ForceTier(1);
+            case "c":
+            case "2":
+                return quality.ForceTier(2);
+            case "+":
+                return quality.ForceTier(quality.CurrentTier - 1);
+            case "-":
+                return quality.ForceTier(quality.CurrentTier + 1);
+            default:
+                return "quality a|b|c|auto|+|-";
+        }
     }
 
     static bool OnOff(string arg)
@@ -330,6 +368,7 @@ public class RemoteControl : MonoBehaviour
         if (lighting != null) report.AppendLine(lighting.StateReport);
         if (streetscape != null) report.AppendLine(streetscape.StateReport);
         if (depth != null) report.AppendLine(depth.StateReport);
+        if (quality != null) report.AppendLine(quality.StateReport);
 
         return report.ToString();
     }
