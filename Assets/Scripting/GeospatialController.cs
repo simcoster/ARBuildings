@@ -24,9 +24,6 @@ public class GeospatialController : MonoBehaviour
     [SerializeField] AlignmentNudge nudge;
     [SerializeField] BuildingLoader buildingLoader;
 
-    [Tooltip("Optional. Told which anchor to ghost once it resolves.")]
-    [SerializeField] StreetscapeShadowSetup streetscapeShadows;
-
     [Header("Site")]
     [Tooltip("Key for this site's saved nudge offsets — the id from buildings.json.")]
     [SerializeField] string siteId = "placeholder-01";
@@ -454,14 +451,10 @@ public class GeospatialController : MonoBehaviour
         // same ones that must apply on site, which is the entire point of saving them.
         if (nudge != null) nudge.Bind(nudgeRoot, siteId);
 
-        // Outdoors the streetscape meshes receive the model's shadow. In preview there is no
-        // ground at all, so one gets made — otherwise the model appears to cast nothing.
+        // In preview there is no ground at all, so one gets made — otherwise the model
+        // appears to cast nothing. Outdoors there is nothing to catch a shadow either now
+        // that streetscape geometry is gone; see the occlusion section in CLAUDE.md.
         if (_previewRoot != null) CreateShadowGround(nudgeRoot);
-
-
-        // Nothing to ghost in preview: there is no streetscape geometry indoors, and the
-        // miniature's anchor point would land inside whatever mesh happened to exist.
-        if (streetscapeShadows != null && _previewRoot == null) streetscapeShadows.SetTarget(anchor);
 
         buildingLoader.LoadInto(alignmentRoot);
     }

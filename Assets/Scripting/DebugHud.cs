@@ -17,7 +17,6 @@ public class DebugHud : MonoBehaviour
     [SerializeField] AlignmentNudge nudge;
     [SerializeField] LightingController lighting;
     [SerializeField] BuildingLoader loader;
-    [SerializeField] StreetscapeShadowSetup streetscape;
     [SerializeField] AdaptiveQuality quality;
     [SerializeField] DepthOcclusion depth;
 
@@ -46,7 +45,6 @@ public class DebugHud : MonoBehaviour
         if (nudge == null) nudge = FindAnyObjectByType<AlignmentNudge>();
         if (lighting == null) lighting = FindAnyObjectByType<LightingController>();
         if (loader == null) loader = FindAnyObjectByType<BuildingLoader>();
-        if (streetscape == null) streetscape = FindAnyObjectByType<StreetscapeShadowSetup>();
         if (quality == null) quality = FindAnyObjectByType<AdaptiveQuality>();
         if (depth == null) depth = FindAnyObjectByType<DepthOcclusion>();
     }
@@ -206,20 +204,10 @@ public class DebugHud : MonoBehaviour
             text += "\n\n";
         }
 
-        if (streetscape != null)
-        {
-            text += $"streetscape: {streetscape.MeshCount} meshes\n" +
-                    $"  {streetscape.GeometryTypeBreakdown}\n" +
-                    $"  target: {streetscape.BuildingProximityReadout}\n" +
-                    $"  cutout: {streetscape.CutoutReadout}\n";
-
-            if (streetscape.DebugMaterialMissing)
-                text += "  NO DEBUG MATERIAL — assign it on XR Origin\n";
-
-            if (_tapResult != "") text += $"  tap: {_tapResult}\n";
-
-            text += "\n";
-        }
+        // Where the streetscape mesh count used to sit. The depth range is the more useful
+        // number: it says whether the only occluder left can reach the building or is about
+        // to swallow it.
+        if (depth != null) text += depth.HudReadout + "\n\n";
 
         var placement = geospatial != null ? geospatial.GetComponent<BuildingPlacement>() : null;
         if (placement != null) text += placement.PlacementReadout + "\n\n";
@@ -245,38 +233,19 @@ public class DebugHud : MonoBehaviour
         float qualityY = pad + boxH + pad * 0.15f;
         DrawQualityControls(w, pad, btnH, qualityY);
 
-        // --- mesh visualisation toggle ---
-        if (streetscape != null &&
-            GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 1.2f, w * 0.22f, btnH),
-                       streetscape.VisualiseMeshes ? "mesh ON" : "mesh", _button))
-            streetscape.VisualiseMeshes = !streetscape.VisualiseMeshes;
-
         // --- light estimation dome ---
         if (lighting != null)
         {
             var lightBg = GUI.backgroundColor;
             if (_showLight) GUI.backgroundColor = Color.cyan;
 
-            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 4.8f, w * 0.22f, btnH),
+            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 2.4f, w * 0.22f, btnH),
                            "light", _button))
                 _showLight = !_showLight;
 
             GUI.backgroundColor = lightBg;
 
             if (_showLight) DrawLightDome(w, pad, btnH);
-        }
-
-        // --- master occlusion switch ---
-        if (streetscape != null)
-        {
-            var occBg = GUI.backgroundColor;
-            if (!streetscape.OccludersEnabled) GUI.backgroundColor = new Color(1f, 0.55f, 0.1f);
-
-            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 7.2f, w * 0.22f, btnH),
-                           streetscape.OccludersEnabled ? "occlude" : "OCC OFF", _button))
-                streetscape.OccludersEnabled = !streetscape.OccludersEnabled;
-
-            GUI.backgroundColor = occBg;
         }
 
         // --- environment depth: the other occluder, the one that can put a person or a
@@ -287,37 +256,23 @@ public class DebugHud : MonoBehaviour
             var depBg = GUI.backgroundColor;
             if (depth.Enabled) GUI.backgroundColor = Color.cyan;
 
-            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 8.4f, w * 0.22f, btnH),
+            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 4.8f, w * 0.22f, btnH),
                            depth.Enabled ? "depth ON" : "depth", _button))
                 depth.Enabled = !depth.Enabled;
 
             GUI.backgroundColor = depBg;
         }
 
-        // --- cutout on/off, to compare against the real world without a rebuild ---
-        if (streetscape != null)
-        {
-            var cutBg = GUI.backgroundColor;
-            if (streetscape.CutoutEnabled) GUI.backgroundColor = Color.cyan;
-
-            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 3.6f, w * 0.22f, btnH),
-                           streetscape.CutoutEnabled ? "cut ON" : "cut", _button))
-                streetscape.CutoutEnabled = !streetscape.CutoutEnabled;
-
-            GUI.backgroundColor = cutBg;
-        }
-
         // --- reload site config, so a pushed buildings.json needs no rebuild ---
         if (geospatial != null &&
-            GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 2.4f, w * 0.22f, btnH),
+            GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 1.2f, w * 0.22f, btnH),
                        "reload", _button))
             geospatial.ReloadSite();
 
         // --- capture: screenshot + full state dump, for diagnosing this away from the site ---
-        if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 6f, w * 0.22f, btnH),
+        if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 3.6f, w * 0.22f, btnH),
                        "capture", _button))
-            _captureResult = DebugCapture.Take(geospatial, loader, nudge, lighting,
-                                               streetscape, Placement);
+            _captureResult = DebugCapture.Take(geospatial, loader, nudge, lighting, Placement);
 
         if (_captureResult != "")
             GUI.Label(new Rect(w - pad - w * 0.42f, pad + btnH * 7.1f, w * 0.4f, btnH),

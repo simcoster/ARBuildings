@@ -28,7 +28,6 @@ public static class DebugCapture
         BuildingLoader loader,
         AlignmentNudge nudge,
         LightingController lighting,
-        StreetscapeShadowSetup streetscape,
         BuildingPlacement placement)
     {
         string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
@@ -44,7 +43,7 @@ public static class DebugCapture
             string imagePath = $"{FolderName}/capture_{stamp}.png";
 
             File.WriteAllText(textPath,
-                BuildReport(stamp, geospatial, loader, nudge, lighting, streetscape, placement));
+                BuildReport(stamp, geospatial, loader, nudge, lighting, placement));
 
             // Captures the composited frame including this HUD, which is deliberate: the
             // on-screen numbers and the dump can then be checked against each other.
@@ -66,7 +65,6 @@ public static class DebugCapture
         BuildingLoader loader,
         AlignmentNudge nudge,
         LightingController lighting,
-        StreetscapeShadowSetup streetscape,
         BuildingPlacement placement)
     {
         var text = new StringBuilder();
@@ -101,14 +99,11 @@ public static class DebugCapture
 
         Section(text, "MODEL", loader != null ? loader.StateReport : "no loader");
         Section(text, "ADJUSTMENT", nudge != null ? nudge.StateReport : "no nudge");
-        // Looked up rather than passed in: there are two independent occluders and a capture
-        // that reports only the streetscape one is how the depth occluder stayed invisible
-        // through a whole site session. Found here so no caller can forget to pass it.
+        // Looked up rather than passed in, so no caller can forget to pass it — a capture that
+        // omitted the depth occluder is how it stayed invisible through a whole site session.
         var depth = UnityEngine.Object.FindAnyObjectByType<DepthOcclusion>();
 
-        Section(text, "OCCLUSION",
-            (streetscape != null ? streetscape.StateReport : "no streetscape") +
-            (depth != null ? depth.StateReport : "depth switch absent"));
+        Section(text, "OCCLUSION", depth != null ? depth.StateReport : "depth switch absent");
         Section(text, "LIGHTING", lighting != null ? lighting.StateReport : "no lighting");
 
         var camera = Camera.main;

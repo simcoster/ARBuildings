@@ -112,9 +112,9 @@ should not require knowing the current value first.
 | `rot` `scale` `scalev` `east` `north` `up` | the five adjustments, absolute or ± relative |
 | `save` `reset` `clear` | save (bakes coordinates when the fix is good), reset all, delete the saved entry |
 | `reload` | re-read `buildings.json` — pair it with pushing a new one |
-| `preview on\|off` `occlude on\|off` `cut on\|off` `mesh on\|off` `sun on\|off` `aspect on\|off` | the HUD toggles |
+| `preview on\|off` `sun on\|off` `aspect on\|off` | the HUD toggles |
 | `capture` `recenter` `state` | screenshot + dump, recentre preview, force a state write |
-| `depth on\|off` | real-world DEPTH occlusion (ARCore/LiDAR). **A different occluder from `occlude`** — see below. Off by default |
+| `depth on\|off` | real-world depth occlusion — **the only occluder there is**. `occlude` is an alias. ON by default |
 | `catcher on\|off` | diagnostic: paint the shadow catcher by its shadow term — green lit, red shadowed |
 
 **`preview on` over the remote does NOT turn forced daylight on**, though the HUD's preview
@@ -123,7 +123,7 @@ off below the horizon and shows an unlit model against a black scene. Always pai
 `preview on` + `sun on`.
 
 The command file is deleted once handled, so pushing the same file again re-runs it. Bare
-`occlude` with no argument means on.
+Bare `depth` with no argument means on.
 
 This does not replace a rebuild — it removes the need for one for anything that is a number or
 a toggle, which on past visits has been nearly everything.
@@ -163,7 +163,7 @@ BuildingAnchor / PreviewRoot / DebugAnchor   the thing we anchor to; ARCore owns
 | `AlignmentNudge` | the five adjustment values + save/load to `adjustments.json` |
 | `DebugHud` | IMGUI instrument panel. No Canvas, no wiring, can't be broken by scene edits |
 | `LightingController` | sun position, light estimation, north alignment, forced daylight |
-| `StreetscapeShadowSetup` | streetscape geometry → occluder / debug materials, occluder cutout, master occlusion switch |
+| `DepthOcclusion` | the only occluder: ARCore's depth map, plus the CPU depth sampling that says whether it can reach the building |
 | `DebugCapture` | `capture` button: screenshot + full state dump to `persistentDataPath/captures` |
 | `AdaptiveQuality` | frame-time tiering, switches URP asset between Tier A/B/C |
 | `RemoteControl` | polls `command.txt` so the app can be nudged over adb without touching the phone |
@@ -212,8 +212,7 @@ coordinates then outrank `buildings.json` on the next run. `clear saved` deletes
 ## The HUD
 
 Button layout is whatever `DebugHud.OnGUI` draws — read it there, including for screen
-coordinates when driving the HUD over `adb shell input tap`. `pick`/`auto` (tap-to-ghost) were
-removed; see the occlusion section.
+coordinates when driving the HUD over `adb shell input tap`.
 
 The light dome is a sky seen from above: centre = zenith, rim = horizon, up-screen = north.
 Coloured cells are the ambient probe by direction, yellow square is the computed sun, small
@@ -226,7 +225,7 @@ Writes a matched pair to `persistentDataPath/captures/`: `capture_<stamp>.png` (
 frame *including* the HUD) and `.txt` (full state — device, quality tier, Earth state and
 accuracies, camera lat/lng/heading, north offset and whether it was measured, sun angles,
 light estimation, model file and applied scale, footprint length and effective heading, all
-five adjustments plus baked coordinates, streetscape counts **by geometry type**, cutout size,
+five adjustments plus baked coordinates, depth-occlusion state and sampled depth range,
 camera pose). Each component supplies its own `StateReport`, so the dump cannot drift out of
 step with the code.
 
@@ -236,47 +235,32 @@ adb pull /sdcard/Android/data/com.pavel.arbuildings/files/captures/
 
 ---
 
-## Occlusion — currently OFF by default
+## Occlusion — depth only
 
-**There are TWO independent occluders, and for a whole site session only one of them was
-known about.** `occlude` controls streetscape geometry. `depth` controls ARCore's depth map,
-which reaches the depth buffer without any of our code or shaders being involved — see
-[Depth occlusion](#depth-occlusion--the-second-invisible-occluder). Every "occlusion is off"
-measurement taken before 2026-08-23 evening only ever measured the first one.
+**Streetscape occlusion was removed on 2026-08-25.** The occluder passes, the cutout, the
+ghosting, the mesh debug view, the master switch, `StreetscapeShadowSetup`, `StreetscapeProbe`
+and the `AR/StreetscapeOccluderShadow`, `AR/StreetscapeDebug` and `AR/GhostWireframe` shaders
+are all gone, along with the `occlude`, `cut` and `mesh` commands. `occlude` survives as an
+alias for `depth`, because muscle memory is real.
 
-`occludersEnabled` defaults to **false**. With it off nothing real can hide the model, which
-separates "the model is in the wrong place" from "the model is behind something" — the single
-most useful diagnostic on site. **Shadows are unaffected**: the master switch only kills the
-depth-only occluder pass, so terrain still catches the model's shadow and neighbours still
-shade it. Toggle with `occlude` in the HUD.
+Why: Google has **no reconstruction of this building** (proven below), so streetscape geometry
+could never occlude the building with the building. All it contributed was the terrain slab
+taking bites out of the model, and a cutout box that clipped the model it was supposed to
+protect. Four site sessions of complexity for a negative contribution.
 
-Why off: ARCore has no mesh for the synagogue itself (proven below), so occlusion here can
-only come from the terrain and the neighbouring buildings, and both removed chunks of the
-model faster than they added realism.
+What was lost, deliberately: streetscape meshes also RECEIVED the model's shadow, so outdoors
+there is now nothing for the model to cast onto. That was already true whenever occluders were
+off, which was the default, and the model casts no shadow at all yet (see Open). Preview still
+builds its own `ShadowGround`.
 
-Three mechanisms exist, in decreasing usefulness at this site:
+It is all in git history if another site ever has real building geometry — but read the
+`google-3d-coverage` skill first and confirm that before spending a day on it.
 
-**The master switch** (`_OccludersDisabled` global) makes the occluder pass discard
-everything. The flag is **inverted deliberately** — an unset Unity global reads as 0, and 0
-must mean "occluders behave normally", or occlusion would switch itself off wherever the
-driving component has not run.
+One loose end: `Assets/ARCoreExtensionsConfig.asset` may still request Streetscape Geometry,
+which now streams meshes nobody consumes. Turning it off is a one-field edit and saves CPU,
+but the Editor must be closed to touch the asset safely.
 
-**The cutout** builds an oriented world-space box from `BuildingLoader.LocalBounds` (plus
-margin and padding) in `StreetscapeShadowSetup.LateUpdate`, publishes it as
-`_OccluderCutoutWorldToLocal` / `_OccluderCutoutOn`, and all three passes of
-`AR/StreetscapeOccluderShadow` discard fragments inside it. Rebuilt every frame because the
-anchor moves on re-localization. Padding goes sideways and **up, never down** past the base,
-or the terrain stops receiving shadow in a skirt around the building and the model's shadow
-looks detached. Caveat: the box is sized from the model, so an oversized model makes an
-oversized box that switches off legitimate occlusion from the **neighbours**.
-
-**Ghosting** swaps one streetscape mesh to `AR/GhostWireframe`. Needs a `Building` mesh for
-the target — which does not exist here. `pick`/tap-to-select was removed along with its
-raycast machinery; it is in git history if another site ever needs it.
-
-`StreetscapeShadowSetup` disables itself in the Editor, so all of this is device-only.
-
-### Depth occlusion — the second, invisible occluder
+### Depth occlusion — now the only occluder
 
 The scene has always carried an **`AROcclusionManager`** with `m_EnvironmentDepthMode: 1`
 (Fastest) and temporal smoothing on. Nothing in this project asked for it, no custom shader
@@ -325,9 +309,30 @@ setters can reach the subsystem and ARCore stops computing depth), `enabled = fa
 watchdog re-applies once a second, because those setters are a **no-op until the subsystem
 exists** — and it does not exist at `Start`.
 
-Kept as a toggle rather than deleted because on an **iPad it is worth turning ON**: LiDAR
-gives real depth at real range, and this is the only mechanism that can put people and cars in
-front of the model.
+**ON by default since 2026-08-25**, because it is now the only occluder and hiding the
+building behind a passing car is the point of having one at all. `depth off` (or `occlude
+off`) is the escape hatch, and being able to A/B it on site without a rebuild is what found
+the flicker in the first place.
+
+**Whether it can work at 28 m is an open measurement, not an assumption.** ARCore depth is
+useful ~0.5-5 m and valid to ~8 m. What it returns BEYOND that decides everything, and the two
+possible answers need opposite responses:
+
+| `depth at centre` says | meaning | what to do |
+|---|---|---|
+| 0, or a number near the real 28 m | far field reads as "nothing there" | nothing — near-field cars and people occlude correctly and the building draws |
+| clamped near ~8 m | the far field claims the world is 8 m away | the model loses the depth test everywhere and vanishes; needs a **max occlusion distance** |
+
+`DepthOcclusion.SampleDepth` reads the depth CPU image once a second and reports
+`depth at centre : <m> at centre | <min>-<max> m over N samples | <w>x<h> <format>`. Point the
+phone at the facade from a known distance and read it. **Both answers look identical from a
+screenshot**, which is why the numbers exist.
+
+If the clamp turns out to be real, the fix is a custom `ARCameraBackground` material: a
+vendored copy of `ARCoreBackground.shader` that writes far depth wherever the sampled distance
+exceeds `_MaxOcclusionDistance`. Put that threshold behind a **material property**, not a
+shader edit — see the build-time table; flipping a float is free, recompiling a shader is a
+quarter of an hour.
 
 ### Confirmed: Google has no building geometry at this site
 
@@ -336,8 +341,8 @@ synagogue** — every historical pano back to 2011 has exactly one wall plane, a
 the hillside 80–90 m to the north. Google models the raised plaza the building stands on and
 stops there. Panos 50–95 m away on the same street *do* carry near-field walls, so the
 reconstruction pipeline works fine in the neighbourhood; it just has nothing for this address.
-**The cutout is the only occlusion mechanism that will ever work at this site** — do not spend
-more time on ghosting here.
+Streetscape geometry therefore could never occlude this building with itself, which is why
+that whole mechanism was removed on 2026-08-25.
 
 Evidence tables, the caveat that Streetscape Geometry is not formally the same dataset, and
 the `streetlevel` reproduction recipe: **`google-3d-coverage` skill**.
@@ -422,10 +427,9 @@ that's why `AREarthManager.Convert()` exists. A true bearing must be rotated int
 frame via `NorthOffsetDeg` (camera yaw − `pose.Heading`) before use, or every shadow points
 somewhere arbitrary that changes per launch.
 
-**Geometry shaders**: `GhostWireframe.shader` uses one. Metal has **no geometry stage at
-all**, so it cannot work on iOS, and Mali support is shaky. The fix is to un-index the mesh
-and bake barycentrics into a UV channel — `StreetscapeShadowSetup.Add()` already builds the
-MeshFilter, so it's one place. **Not done yet.**
+~~**Geometry shaders**: `GhostWireframe.shader` uses one.~~ Moot since 2026-08-25 — that
+shader was deleted with the rest of streetscape occlusion. Worth remembering only if one is
+ever written again: Metal has **no geometry stage at all** and Mali support is shaky.
 
 **A Unity Quad's normal is +Z.** `Euler(90,0,0)` points it down (back-face culled, invisible);
 `Euler(-90,0,0)` points it up.
@@ -456,8 +460,8 @@ offset (`LookRotation(toCamera) * Euler(0, -ModelFrontOffsetDeg, 0)`), so on sit
 facade INTO the building. Fix it in `buildings.json` + `reload` rather than dialling `rot 180`
 by hand, which nobody will remember to re-enter. **Not yet applied.**
 
-**Location off ⇒ no streetscape, and a locked phone ⇒ no AR session.** With location disabled
-the HUD reads `streetscape: 0 meshes` and Earth never tracks. Separately the phone's 10-minute
+**Location off ⇒ Earth never tracks, and a locked phone ⇒ no AR session.** With location
+disabled Earth never reaches Tracking. Separately the phone's 10-minute
 screen timeout suspends the session mid-experiment; `adb shell settings put global
 stay_on_while_plugged_in 3` keeps it awake while on USB.
 
@@ -524,17 +528,48 @@ compile against it, so it cannot simply be excluded. This is why **CoplayDev's u
 never start** — its `EditorStateCache` calls `isCompiling` from a static constructor, so the
 type poisons itself and the HTTP listener never binds. Unity's own MCP server
 (`com.unity.ai.assistant`, an external relay) is unaffected. The exception predates all of
-this work; it will bite the next Editor tool that touches compilation state. Local unblock, if
-one is ever needed, is to overwrite ARCore's copy with Unity's
-`Editor/Data/Managed/Google.Protobuf.dll` — back the original up first, and know it is lost
-whenever the package re-resolves.
+this work; it will bite the next Editor tool that touches compilation state.
+
+**It surfaces in the Console as a URP error, which is misleading** — the stack is
+`ScriptableRendererData.OnValidate` → `EditorApplication.get_isCompiling`, so it reads like a
+render-pipeline fault and is nothing of the kind. URP is only the caller. That flavour is
+mostly cosmetic: `SetDirty()` has already run by the time it throws, so what is lost is
+null-renderer-feature validation and a hide-flags migration. It fires at **every domain
+reload**, and 13 of them sit in `Logs/Editor.log` going back to 2026-08-22 — it is not new,
+whatever prompted you to notice it. Batchmode builds are unaffected and have never failed on it.
+
+The unblock is scripted: **`tools/fix-arcore-protobuf.ps1`** overwrites ARCore's copy with
+Unity's `Editor/Data/Managed/Google.Protobuf.dll`, backing the original up as `.orig` once.
+`-Restore` puts it back. **Unity must be closed** — the DLL is loaded in the running Editor
+domain, so the copy would fail on a file lock and the poisoned type would survive anyway; the
+script refuses rather than half-applying. It lives in `Library/PackageCache`, so **the fix is
+lost on every package re-resolve** and the script has to be re-run.
+
+**There is no upgrade out of this — checked 2026-08-25, do not check again.** `refs/heads/arf6`
+is `d5510e570b0c`, which *is* `refs/tags/v1.54.0-arf6`, which is the folder already in
+PackageCache. 1.54.0 is the newest tag on `arf4`, `arf5`, `arf6` and `main` alike. Verified by
+reading assembly identities without loading them
+(`[Reflection.AssemblyName]::GetAssemblyName`):
+
+| DLL | identity |
+|---|---|
+| ARCore Extensions 1.54.0 | `Version=0.0.0.0, PublicKeyToken=null` |
+| Unity 6000.5.7f1 Editor | `Version=3.23.0.0, PublicKeyToken=a7d26565bac4d604` |
+| Burst `.Runtime/` | `Version=3.30.2.0, PublicKeyToken=a7d26565bac4d604` |
+
+Burst's copy is signed and newer but sits in a dot-prefixed folder Unity does not import as an
+Editor assembly, so it never enters the fight. If the script's re-run-after-every-resolve cost
+ever becomes annoying, the permanent option is to **embed** the package (copy PackageCache →
+`Packages/com.google.ar.core.arfoundation.extensions`, patch the DLL there, drop the manifest
+git URL) — version-controlled and resolve-proof, at the price of a vendored package and manual
+upgrades. Not done.
 
 ---
 
 ## State
 
 Works on device: VPS localization (routinely **±0.6–1.4 m, yaw ±1.6–2°** at this site), terrain
-anchor, GLB load, camera feed, streetscape streaming (27 meshes: 24 building + 3 terrain),
+anchor, GLB load, camera feed,
 preview mode, floor placement, shadows, the adjustment sliders, save/load, coordinate baking,
 capture, hot-reloadable config.
 
@@ -545,7 +580,7 @@ confirmed running on device too — the "awaiting one rebuild" note that used to
 stale by at least one build.
 
 Never verified on device: footprint mode landing correctly at the real site, the corrected
-×1.87 scale, ghost wireframe rendering (and it never will here).
+×1.87 scale.
 
 **The next session is a tripod session**: phone fixed and pointed at the facade, laptop on
 adb, no hands on the device. Screenshots via `adb exec-out screencap`, state via
@@ -557,7 +592,7 @@ adb, no hands on the device. Screenshots via `adb exec-out screencap`, state via
 The **flicker is fixed** (build stamp `2026-08-23 19:58:05`): it was ARCore's depth map being
 written into the depth buffer by the camera background pass, and `depth off` is now the
 default. Full account in `docs/2026-08-23-first-site-session.md`; mechanism in
-[Depth occlusion](#depth-occlusion--the-second-invisible-occluder). The anchor-deactivation
+[Depth occlusion](#depth-occlusion--now-the-only-occluder). The anchor-deactivation
 theory is dead — `anchor trackable` reads `Tracking, active=True` throughout.
 
 Two things to do **before** trusting any placement reading next time:
@@ -607,31 +642,12 @@ Open:
   site session.** The manager was in the scene and enabled the whole time, and it needs no
   shader of ours: the camera background pass writes ARCore's depth into the depth buffer and
   every opaque object is tested against it. Now switched **off** by default and exposed as
-  `depth on|off`. See [Depth occlusion](#depth-occlusion--the-second-invisible-occluder).
-  Turning it **on** is the right call on LiDAR hardware.
+  `depth on|off`. See [Depth occlusion](#depth-occlusion--now-the-only-occluder).
 - ~~Geospatial Creator / 3D tiles in the Editor~~ — **closed, do not reopen.** Built, measured,
   removed; Google has no reconstruction of this building and ARCore's Geospatial Creator cannot
   work on Unity 6.5 at all. See the simulator postmortem above.
-- **The iPad target (Unity Build Automation), scoped 2026-08-23 but not started.** The iPad
-  has **LiDAR and no GPS**, which flips two decisions:
-  - **Turn `depth` ON there.** LiDAR gives real depth at real range, and it is the only
-    mechanism that can put people and cars in front of the model — something streetscape
-    geometry can never do. This is why the depth switch is a toggle and not a deletion.
-  - **No GPS means no Geospatial.** VPS needs a coarse location prior and a Wi-Fi-only iPad
-    has none outdoors. The iPad build is a **preview / manual-placement** app — which already
-    works. Consider dropping ARCore Extensions from the iOS target entirely: it removes the
-    CocoaPods / ARCore-iOS-SDK complications from cloud CI in one move.
-
-  Four concrete blockers, all verified in the repo:
-  1. `locationUsageDescription` is **empty** (`ProjectSettings/ProjectSettings.asset:584`) —
-     a crash or a store rejection the moment anything asks for location.
-  2. `GhostWireframe.shader` uses `#pragma geometry` and **Metal has no geometry stage**.
-     Ghosting is already dead at this site, so excluding it from the iOS target is the cheap
-     fix.
-  3. `appleEnableAutomaticSigning: 0`, so Build Automation needs a provisioning profile and
-     `.p12` uploaded.
-  4. Already fine: `targetDevice: 2` (iPhone + iPad), iOS 15.0, `com.unity.xr.arkit` 6.5.0
-     installed, and `ProjectSettings/ARCoreExtensionsProjectSettings.json` has
-     `IsIOSSupportEnabled: true` with an iOS API key — relevant only if Extensions is kept.
-- Ghosting is **dead at this site** — Google's reconstruction has no building geometry here
-  (see the section above). Only matters if the app is ever pointed at another address.
+- ~~iOS / iPad via Unity Build Automation~~ — **dropped 2026-08-25.** Cloud Build was tried
+  and did not work. **Android is the only target.** If it is ever reopened, the scoping done
+  on 2026-08-23 was: no GPS on a Wi-Fi iPad means no Geospatial at all, so it would be a
+  preview / manual-placement build; `locationUsageDescription` is empty; and signing is manual
+  (`appleEnableAutomaticSigning: 0`). The geometry-shader blocker is gone with the shader.

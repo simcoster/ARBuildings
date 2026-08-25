@@ -41,18 +41,28 @@ using UnityEngine.XR.ARSubsystems;
 /// </para>
 ///
 /// <para>
-/// Off by default, therefore. It is a toggle rather than a deletion because on an iPad the
-/// same switch is worth turning ON: LiDAR gives a real depth image at real range, and there
-/// this is the mechanism that puts people and cars in front of the model — the one thing
-/// streetscape geometry can never do.
+/// <b>This is now the only occluder in the app</b>, and it is ON by default. Streetscape
+/// geometry — the occluder passes, the cutout, the ghosting and the master switch — was
+/// removed on 2026-08-25: Google has no reconstruction of this building, so all it could ever
+/// contribute was the terrain slab taking bites out of the model. Depth is the only mechanism
+/// that can do the thing actually wanted here, which is to let a car or a pedestrian pass in
+/// front of the building and hide it.
+/// </para>
+///
+/// <para>
+/// Whether it CAN do that at this site is an open measurement, not an assumption. See
+/// <see cref="SampleDepth"/>: if ARCore clamps its far field to ~8 m then a building at 28 m
+/// loses the depth test everywhere and the model vanishes, and the fix is a maximum occlusion
+/// distance — which needs a custom camera-background material. `depth off` is the escape
+/// hatch in the meantime.
 /// </para>
 /// </summary>
 public class DepthOcclusion : MonoBehaviour
 {
-    [Tooltip("Whether real-world depth is allowed to hide the model. OFF on Android: ARCore " +
-             "depth cannot reach the building and is broken on this device. Worth turning ON " +
-             "for LiDAR hardware.")]
-    [SerializeField] bool enableOnStart = false;
+    [Tooltip("Whether real-world depth is allowed to hide the model. This is now the ONLY " +
+             "occluder in the app, so ON is the intended state — a car or a pedestrian in " +
+             "front of the building should hide it.")]
+    [SerializeField] bool enableOnStart = true;
 
     [Tooltip("Depth mode requested when this is switched on. Fastest is the right trade for " +
              "occlusion — the extra quality only sharpens edges.")]
@@ -124,6 +134,112 @@ public class DepthOcclusion : MonoBehaviour
         // looks exactly like the switch not working.
         if (_manager != null && _manager.enabled != enableOnStart)
             Apply();
+
+        SampleDepth();
+    }
+
+    // --- what ARCore actually thinks the distances are -------------------------------------
+
+    string _depthReadout = "not sampled yet";
+
+    /// <summary>
+    /// Reads the depth image on the CPU once a second and reports the metres at the centre of
+    /// frame, plus the range across the whole image.
+    ///
+    /// <para>
+    /// This one line decides whether depth occlusion can work at this site at all. ARCore's
+    /// depth is useful from about 0.5 m to 5 m and valid to about 8 m; the building is 28 m
+    /// away. The question is what ARCore returns beyond its range, and the two answers demand
+    /// opposite fixes:
+    /// </para>
+    ///
+    /// <list type="bullet">
+    /// <item><b>0, or something larger than the building's distance</b> — far field reads as
+    /// "nothing there", the model draws, and near-field cars and pedestrians still occlude it
+    /// correctly. Depth occlusion works as asked and there is nothing more to do.</item>
+    /// <item><b>Clamped to roughly 8 m</b> — the far field claims the whole world is 8 m away,
+    /// the building at 28 m loses the depth test everywhere, and the model vanishes. That is
+    /// the 2026-08-23 flicker, and the fix is a maximum occlusion distance, which needs a
+    /// custom camera-background material.</item>
+    /// </list>
+    ///
+    /// <para>
+    /// Point the phone at the facade from a known distance and read `depth at centre`. Both
+    /// answers look identical from a screenshot, which is the whole reason this exists.
+    /// </para>
+    /// </summary>
+    void SampleDepth()
+    {
+        if (_manager == null || !_manager.enabled)
+        {
+            _depthReadout = "not sampled (occlusion off)";
+            return;
+        }
+
+        if (!_manager.TryAcquireEnvironmentDepthCpuImage(out var image))
+        {
+            _depthReadout = "no CPU depth image available";
+            return;
+        }
+
+        using (image)
+        {
+            var plane = image.GetPlane(0);
+            var data = plane.data;
+
+            float centre = ReadMetres(data, plane, image.format, image.width / 2, image.height / 2);
+
+            // Coarse grid rather than every pixel: this runs once a second on the main thread
+            // and the shape of the range is what matters, not the exact extremes.
+            float min = float.MaxValue, max = 0f;
+            int valid = 0, total = 0;
+
+            for (int y = 0; y < image.height; y += 8)
+            {
+                for (int x = 0; x < image.width; x += 8)
+                {
+                    total++;
+                    float m = ReadMetres(data, plane, image.format, x, y);
+                    if (m <= 0f) continue;      // 0 is ARCore's "no reading here"
+                    valid++;
+                    if (m < min) min = m;
+                    if (m > max) max = m;
+                }
+            }
+
+            string range = valid > 0
+                ? $"{min:F2}-{max:F2} m over {valid}/{total} samples"
+                : $"NO valid samples in {total}";
+
+            _depthReadout = $"{centre:F2} m at centre | {range} | " +
+                            $"{image.width}x{image.height} {image.format}";
+        }
+    }
+
+    /// <summary>
+    /// One depth pixel in metres. ARCore hands back either 16-bit millimetres or 32-bit
+    /// metres depending on the device and the smoothing mode, and getting the two confused
+    /// reads as a factor of a thousand — so both are handled explicitly rather than assumed.
+    /// </summary>
+    static float ReadMetres(Unity.Collections.NativeArray<byte> data, XRCpuImage.Plane plane,
+                            XRCpuImage.Format format, int x, int y)
+    {
+        int i = y * plane.rowStride + x * plane.pixelStride;
+        if (i < 0 || i + 1 >= data.Length) return 0f;
+
+        switch (format)
+        {
+            case XRCpuImage.Format.DepthUint16:
+                return (ushort)(data[i] | (data[i + 1] << 8)) * 0.001f;
+
+            case XRCpuImage.Format.DepthFloat32:
+                if (i + 3 >= data.Length) return 0f;
+                return System.BitConverter.ToSingle(
+                    new[] { data[i], data[i + 1], data[i + 2], data[i + 3] }, 0);
+
+            default:
+                return 0f;
+        }
     }
 
     void Apply()
@@ -164,6 +280,14 @@ public class DepthOcclusion : MonoBehaviour
     }
 
     /// <summary>
+    /// Two lines for the HUD: whether the only occluder in the app is on, and what ARCore
+    /// thinks the distances in front of the camera are. The second is the one that says
+    /// whether depth can reach the building or is about to eat it.
+    /// </summary>
+    public string HudReadout =>
+        $"occlusion: depth {(enableOnStart ? "ON" : "OFF")}\n  {_depthReadout}";
+
+    /// <summary>
     /// Enough to tell "the switch is off" from "the switch did not take", which are the two
     /// states that matter and are indistinguishable from a screenshot. <c>current</c> is what
     /// the subsystem is actually doing; <c>requested</c> is only what we asked for.
@@ -193,6 +317,7 @@ public class DepthOcclusion : MonoBehaviour
                                    ? $"{texture.width}x{texture.height} — a depth image IS being " +
                                      "produced, and the background pass writes it into the buffer"
                                    : "none"));
+            report.AppendLine($"depth at centre    : {_depthReadout}");
             return report.ToString();
         }
     }

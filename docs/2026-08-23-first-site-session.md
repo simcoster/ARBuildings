@@ -163,7 +163,8 @@ Fixed by `DepthOcclusion`, off by default, `depth on|off` over `RemoteControl`, 
 The lever is `AROcclusionManager.enabled` rather than the depth mode, because the background
 material's depth keyword is only ever pushed on a frame event — stop the frames and the
 keyword stays stuck on, while disabling the manager makes the package fire one last event that
-clears it. Kept as a toggle because on iPad LiDAR it is worth turning **on**.
+clears it. Kept as a toggle rather than deleted because being able to A/B an occluder on site
+without a rebuild is what found this in the first place.
 
 Measured across the two builds:
 
@@ -298,5 +299,5 @@ Unity's own build also touched `ProjectSettings/ProjectSettings.asset`,
 `ProjectSettings/EditorBuildSettings.asset` and `Assets/Plugins/Android/proguard-user.txt` —
 those are the Editor's, not this work's.
 
-The **iPad / Unity Build Automation** target was scoped but not started; the four blockers and
-the reasoning for turning `depth` **on** there are in `CLAUDE.md` under Open.
+The **iPad / Unity Build Automation** target was scoped here but **dropped on 2026-08-25** —
+Cloud Build was tried and did not work. Android is the only target.

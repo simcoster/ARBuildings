@@ -23,8 +23,9 @@ using UnityEngine;
 ///     rot 9.57        heading, absolute
 ///     scale 1.02      east -0.4      north +0.2      up 0      scalev 1.0
 ///     save            reset          clear           reload
-///     preview on      occlude off    cut on          mesh off    sun on   aspect on
-///     depth off       real-world DEPTH occlusion — a different occluder from `occlude`
+///     preview on      sun on         aspect on
+///     depth on|off    real-world depth occlusion — the only occluder there is.
+///                     `occlude` is an alias for it; `cut` and `mesh` are gone with streetscape
 ///     quality a|b|c   pin a tier (auto off). quality auto resumes. quality + / - nudge
 ///     recenter        capture        state
 ///
@@ -53,7 +54,6 @@ public class RemoteControl : MonoBehaviour
     [SerializeField] AlignmentNudge nudge;
     [SerializeField] LightingController lighting;
     [SerializeField] BuildingLoader loader;
-    [SerializeField] StreetscapeShadowSetup streetscape;
     [SerializeField] DepthOcclusion depth;
     [SerializeField] AdaptiveQuality quality;
 
@@ -71,7 +71,6 @@ public class RemoteControl : MonoBehaviour
         if (nudge == null) nudge = FindAnyObjectByType<AlignmentNudge>();
         if (lighting == null) lighting = FindAnyObjectByType<LightingController>();
         if (loader == null) loader = FindAnyObjectByType<BuildingLoader>();
-        if (streetscape == null) streetscape = FindAnyObjectByType<StreetscapeShadowSetup>();
 
         // Added in code rather than to the scene deliberately: the scene is the one thing that
         // cannot be edited while the Editor holds it, and this switch had to exist on the
@@ -210,7 +209,7 @@ public class RemoteControl : MonoBehaviour
                 return "preview recentred";
 
             case "capture":
-                return DebugCapture.Take(geospatial, loader, nudge, lighting, streetscape,
+                return DebugCapture.Take(geospatial, loader, nudge, lighting,
                     geospatial != null ? geospatial.GetComponent<BuildingPlacement>() : null);
 
             case "preview":
@@ -218,22 +217,13 @@ public class RemoteControl : MonoBehaviour
                 geospatial.SetPreview(OnOff(arg));
                 return $"preview {(geospatial.PreviewActive ? "on" : "off")}";
 
+            // The only occluder there is. `occlude`, `cut` and `mesh` were streetscape
+            // geometry and are gone — see the occlusion section in CLAUDE.md.
             case "occlude":
-                if (streetscape == null) return "no streetscape";
-                streetscape.OccludersEnabled = OnOff(arg);
-                return $"occluders {(streetscape.OccludersEnabled ? "on" : "off")}";
-
-            // The OTHER occluder: ARCore's depth map, written into the depth buffer by the
-            // camera background pass. `occlude` does not touch it and never did.
             case "depth":
                 if (depth == null) return "no depth switch";
                 depth.Enabled = OnOff(arg);
                 return $"depth occlusion {(depth.Enabled ? "on" : "off")}";
-
-            case "cut":
-                if (streetscape == null) return "no streetscape";
-                streetscape.CutoutEnabled = OnOff(arg);
-                return $"cutout {(streetscape.CutoutEnabled ? "on" : "off")}";
 
             // Diagnostic, not a look: paints the shadow catcher green where the shadow map
             // says lit and red where it says shadowed.
@@ -241,11 +231,6 @@ public class RemoteControl : MonoBehaviour
                 if (geospatial == null) return "no controller";
                 geospatial.ShadowCatcherDebug = OnOff(arg);
                 return $"catcher debug {(geospatial.ShadowCatcherDebug ? "on" : "off")}";
-
-            case "mesh":
-                if (streetscape == null) return "no streetscape";
-                streetscape.VisualiseMeshes = OnOff(arg);
-                return $"mesh debug {(streetscape.VisualiseMeshes ? "on" : "off")}";
 
             case "sun":
                 if (lighting == null) return "no lighting";
@@ -366,7 +351,6 @@ public class RemoteControl : MonoBehaviour
         if (nudge != null) report.AppendLine(nudge.StateReport);
         if (loader != null) report.AppendLine(loader.StateReport);
         if (lighting != null) report.AppendLine(lighting.StateReport);
-        if (streetscape != null) report.AppendLine(streetscape.StateReport);
         if (depth != null) report.AppendLine(depth.StateReport);
         if (quality != null) report.AppendLine(quality.StateReport);
 
