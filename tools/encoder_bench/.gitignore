@@ -3,3 +3,8 @@ onnx/
 results*.json
 __pycache__/
 iso_*.json
+npu_models/
+android/benchmark_model
+android/tflite_aar/
+npu_gate_raw.txt
+

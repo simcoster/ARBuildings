@@ -8,6 +8,9 @@ dependencies {
 // Android Resolver Dependencies Start
     implementation 'com.google.android.gms:play-services-location:17+' // Google.XR.ARCoreExtensions.Editor.Internal.ExternalDependencyResolverHelper.RegisterAndroidDependencies
 // Android Resolver Dependencies End
+    // Outside the Resolver block on purpose — EDM periodically rewrites that
+    // region and has already stripped play-services-location three times.
+    implementation 'org.tensorflow:tensorflow-lite:2.16.1'
 **DEPS**}
 
 // Android Resolver Exclusions Start

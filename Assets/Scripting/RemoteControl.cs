@@ -26,6 +26,10 @@ using UnityEngine;
 ///     preview on      sun on         aspect on
 ///     depth on|off    real-world depth occlusion — the only occluder there is.
 ///                     `occlude` is an alias for it; `cut` and `mesh` are gone with streetscape
+///     seg on|off      NPU semantic expansion of that depth (whole object, never the floor)
+///     segmin N        pixels of ARCore-depth overlap before a segment is expanded
+///     segdebug on|off tint accepted segments
+///     segmax N        max occlusion distance in metres (0 = no cap)
 ///     quality a|b|c   pin a tier (auto off). quality auto resumes. quality + / - nudge
 ///     recenter        capture        state
 ///
@@ -55,6 +59,7 @@ public class RemoteControl : MonoBehaviour
     [SerializeField] LightingController lighting;
     [SerializeField] BuildingLoader loader;
     [SerializeField] DepthOcclusion depth;
+    [SerializeField] SemanticOcclusion seg;
     [SerializeField] AdaptiveQuality quality;
 
     float _pollTimer;
@@ -78,6 +83,8 @@ public class RemoteControl : MonoBehaviour
         // serialized in the scene.
         if (depth == null) depth = FindAnyObjectByType<DepthOcclusion>();
         if (depth == null) depth = gameObject.AddComponent<DepthOcclusion>();
+        if (seg == null) seg = FindAnyObjectByType<SemanticOcclusion>();
+        if (seg == null) seg = gameObject.AddComponent<SemanticOcclusion>();
         if (quality == null) quality = FindAnyObjectByType<AdaptiveQuality>();
 
         Debug.Log($"[Remote] listening on {CommandPath}");
@@ -225,6 +232,32 @@ public class RemoteControl : MonoBehaviour
                 depth.Enabled = OnOff(arg);
                 return $"depth occlusion {(depth.Enabled ? "on" : "off")}";
 
+            case "seg":
+                if (seg == null) return "no semantic occlusion";
+                seg.Enabled = OnOff(arg);
+                return $"seg {(seg.Enabled ? "on" : "off")} (overlay {(seg.Enabled ? "on" : "off")})";
+
+            case "segmin":
+                if (seg == null) return "no semantic occlusion";
+                if (arg.Length == 0) return $"segmin {seg.MinVotePixels}";
+                if (!int.TryParse(arg, NumberStyles.Integer, CultureInfo.InvariantCulture, out int minPx))
+                    return $"ERROR '{arg}' is not an int";
+                seg.MinVotePixels = minPx;
+                return $"segmin {seg.MinVotePixels}";
+
+            case "segdebug":
+                if (seg == null) return "no semantic occlusion";
+                seg.DebugTint = OnOff(arg);
+                return $"segdebug {(seg.DebugTint ? "on" : "off")}";
+
+            case "segmax":
+                if (seg == null) return "no semantic occlusion";
+                if (arg.Length == 0) return $"segmax {seg.MaxOcclusionDistance:F1}";
+                if (!float.TryParse(arg, NumberStyles.Float, CultureInfo.InvariantCulture, out float maxM))
+                    return $"ERROR '{arg}' is not a number";
+                seg.MaxOcclusionDistance = maxM;
+                return $"segmax {seg.MaxOcclusionDistance:F1}";
+
             // Diagnostic, not a look: paints the shadow catcher green where the shadow map
             // says lit and red where it says shadowed.
             case "catcher":
@@ -352,7 +385,10 @@ public class RemoteControl : MonoBehaviour
         if (loader != null) report.AppendLine(loader.StateReport);
         if (lighting != null) report.AppendLine(lighting.StateReport);
         if (depth != null) report.AppendLine(depth.StateReport);
+        if (seg != null) report.AppendLine(seg.StateReport);
         if (quality != null) report.AppendLine(quality.StateReport);
+        var perf = FindAnyObjectByType<PerfMeters>();
+        if (perf != null) report.AppendLine(perf.StateReport);
 
         return report.ToString();
     }

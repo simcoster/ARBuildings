@@ -85,7 +85,9 @@ public static class DebugCapture
             $"unity              : {Application.unityVersion}\n");
 
         var quality = UnityEngine.Object.FindAnyObjectByType<AdaptiveQuality>();
+        var perf = UnityEngine.Object.FindAnyObjectByType<PerfMeters>();
         Section(text, "QUALITY", quality != null ? quality.StateReport : "no AdaptiveQuality");
+        Section(text, "PERF", perf != null ? perf.StateReport : "no PerfMeters");
 
         Section(text, "PLACEMENT", geospatial != null ? geospatial.StateReport : "no controller");
 
@@ -102,8 +104,10 @@ public static class DebugCapture
         // Looked up rather than passed in, so no caller can forget to pass it — a capture that
         // omitted the depth occluder is how it stayed invisible through a whole site session.
         var depth = UnityEngine.Object.FindAnyObjectByType<DepthOcclusion>();
+        var seg = UnityEngine.Object.FindAnyObjectByType<SemanticOcclusion>();
 
         Section(text, "OCCLUSION", depth != null ? depth.StateReport : "depth switch absent");
+        Section(text, "SEMANTIC", seg != null ? seg.StateReport : "semantic occlusion absent");
         Section(text, "LIGHTING", lighting != null ? lighting.StateReport : "no lighting");
 
         var camera = Camera.main;

@@ -19,6 +19,8 @@ public class DebugHud : MonoBehaviour
     [SerializeField] BuildingLoader loader;
     [SerializeField] AdaptiveQuality quality;
     [SerializeField] DepthOcclusion depth;
+    [SerializeField] SemanticOcclusion seg;
+    PerfMeters _perf;
 
     bool _visible = true;
     GUIStyle _label, _button, _box, _sliderTrack, _sliderThumb;
@@ -47,6 +49,8 @@ public class DebugHud : MonoBehaviour
         if (loader == null) loader = FindAnyObjectByType<BuildingLoader>();
         if (quality == null) quality = FindAnyObjectByType<AdaptiveQuality>();
         if (depth == null) depth = FindAnyObjectByType<DepthOcclusion>();
+        if (seg == null) seg = FindAnyObjectByType<SemanticOcclusion>();
+        _perf = GetComponent<PerfMeters>() ?? gameObject.AddComponent<PerfMeters>();
     }
 
     // AlignmentNudge enables this too; the support is reference-counted, so both can.
@@ -175,6 +179,10 @@ public class DebugHud : MonoBehaviour
                        _visible ? "hide" : "info", _button))
             _visible = !_visible;
 
+        float boxW = w * 0.7f;
+        float meterH = Screen.height * 0.085f;
+        DrawPerfMeters(new Rect(pad, pad, boxW, meterH));
+
         if (!_visible) return;
 
         var text = "";
@@ -208,6 +216,7 @@ public class DebugHud : MonoBehaviour
         // number: it says whether the only occluder left can reach the building or is about
         // to swallow it.
         if (depth != null) text += depth.HudReadout + "\n\n";
+        if (seg != null) text += seg.HudReadout + "\n\n";
 
         var placement = geospatial != null ? geospatial.GetComponent<BuildingPlacement>() : null;
         if (placement != null) text += placement.PlacementReadout + "\n\n";
@@ -218,19 +227,19 @@ public class DebugHud : MonoBehaviour
         if (nudge != null) text += nudge.DebugReadout + "\n\n";
         if (lighting != null) text += lighting.DebugReadout;
 
-        float boxW = w * 0.7f;
         // Leave a row under the box for AUTO/A/B/C so those buttons are not fighting
         // preview / place-on-floor, and so the info text is not the only quality control.
         float boxH = Screen.height * 0.38f;
+        float boxY = pad + meterH + pad * 0.15f;
 
         var prev = GUI.color;
         GUI.color = new Color(0f, 0f, 0f, 0.55f);
-        GUI.Box(new Rect(pad, pad, boxW, boxH), GUIContent.none, _box);
+        GUI.Box(new Rect(pad, boxY, boxW, boxH), GUIContent.none, _box);
         GUI.color = prev;
 
-        GUI.Label(new Rect(pad * 1.5f, pad * 1.5f, boxW - pad, boxH - pad), text, _label);
+        GUI.Label(new Rect(pad * 1.5f, boxY + pad * 0.5f, boxW - pad, boxH - pad), text, _label);
 
-        float qualityY = pad + boxH + pad * 0.15f;
+        float qualityY = boxY + boxH + pad * 0.15f;
         DrawQualityControls(w, pad, btnH, qualityY);
 
         // --- light estimation dome ---
@@ -261,6 +270,19 @@ public class DebugHud : MonoBehaviour
                 depth.Enabled = !depth.Enabled;
 
             GUI.backgroundColor = depBg;
+        }
+
+        if (seg == null) seg = FindAnyObjectByType<SemanticOcclusion>();
+        if (seg != null)
+        {
+            var segBg = GUI.backgroundColor;
+            if (seg.Enabled) GUI.backgroundColor = Color.cyan;
+
+            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 6.0f, w * 0.22f, btnH),
+                           seg.Enabled ? "seg ON" : "seg", _button))
+                seg.Enabled = !seg.Enabled;
+
+            GUI.backgroundColor = segBg;
         }
 
         // --- reload site config, so a pushed buildings.json needs no rebuild ---
@@ -394,6 +416,64 @@ public class DebugHud : MonoBehaviour
         if (GUI.Button(new Rect(pad + (actionW + gap) * 2f, actionY, actionW, btnH),
                        "clear saved", _button))
             nudge.ClearSaved();
+    }
+
+    /// <summary>
+    /// Task Manager-style CPU / GPU / NPU bars. Stay up when the rest of the HUD is
+    /// hidden so a tripod session can watch load without covering the facade in text.
+    /// </summary>
+    void DrawPerfMeters(Rect area)
+    {
+        if (_perf == null) _perf = GetComponent<PerfMeters>();
+
+        var prev = GUI.color;
+        GUI.color = new Color(0f, 0f, 0f, 0.55f);
+        GUI.Box(area, GUIContent.none, _box);
+        GUI.color = prev;
+
+        float inset = area.width * 0.03f;
+        float innerX = area.x + inset;
+        float innerW = area.width - inset * 2f;
+        float rowH = area.height / 3f;
+
+        DrawMeterRow(new Rect(innerX, area.y, innerW, rowH),
+                     "CPU", _perf != null && _perf.CpuValid, _perf != null ? _perf.CpuPct : -1f,
+                     new Color(0.09f, 0.78f, 0.15f));
+        DrawMeterRow(new Rect(innerX, area.y + rowH, innerW, rowH),
+                     "GPU", _perf != null && _perf.GpuValid, _perf != null ? _perf.GpuPct : -1f,
+                     new Color(0.15f, 0.65f, 0.98f));
+        DrawMeterRow(new Rect(innerX, area.y + rowH * 2f, innerW, rowH),
+                     "NPU", _perf != null && _perf.NpuValid, _perf != null ? _perf.NpuPct : -1f,
+                     new Color(0.78f, 0.28f, 0.92f));
+    }
+
+    void DrawMeterRow(Rect row, string name, bool valid, float pct, Color fill)
+    {
+        float labelW = row.width * 0.13f;
+        float valueW = row.width * 0.14f;
+        float barX = row.x + labelW;
+        float barW = row.width - labelW - valueW;
+        float barY = row.y + row.height * 0.22f;
+        float barH = row.height * 0.56f;
+
+        GUI.Label(new Rect(row.x, row.y, labelW, row.height), name, _label);
+
+        var prev = GUI.color;
+        GUI.color = new Color(1f, 1f, 1f, 0.18f);
+        GUI.DrawTexture(new Rect(barX, barY, barW, barH), Texture2D.whiteTexture);
+
+        if (valid)
+        {
+            float t = Mathf.Clamp01(pct / 100f);
+            Color c = fill;
+            if (t > 0.85f) c = Color.Lerp(fill, new Color(0.95f, 0.2f, 0.15f), (t - 0.85f) / 0.15f);
+            GUI.color = c;
+            GUI.DrawTexture(new Rect(barX, barY, barW * t, barH), Texture2D.whiteTexture);
+        }
+
+        GUI.color = prev;
+        GUI.Label(new Rect(barX + barW + row.width * 0.01f, row.y, valueW, row.height),
+                  valid ? $"{pct:F0}%" : "n/a", _label);
     }
 
     /// <summary>

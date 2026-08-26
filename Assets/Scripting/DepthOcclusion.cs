@@ -221,7 +221,7 @@ public class DepthOcclusion : MonoBehaviour
     /// metres depending on the device and the smoothing mode, and getting the two confused
     /// reads as a factor of a thousand — so both are handled explicitly rather than assumed.
     /// </summary>
-    static float ReadMetres(Unity.Collections.NativeArray<byte> data, XRCpuImage.Plane plane,
+    public static float ReadMetres(Unity.Collections.NativeArray<byte> data, XRCpuImage.Plane plane,
                             XRCpuImage.Format format, int x, int y)
     {
         int i = y * plane.rowStride + x * plane.pixelStride;

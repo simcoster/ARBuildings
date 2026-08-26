@@ -1,0 +1,3 @@
+-keep class com.pavel.arbuildings.NpuSegmenter { *; }
+-keep class org.tensorflow.lite.** { *; }
+-keep class org.tensorflow.lite.nnapi.** { *; }
