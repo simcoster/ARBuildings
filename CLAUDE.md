@@ -115,6 +115,8 @@ should not require knowing the current value first.
 | `preview on\|off` `sun on\|off` `aspect on\|off` | the HUD toggles |
 | `capture` `recenter` `state` | screenshot + dump, recentre preview, force a state write |
 | `depth on\|off` | real-world depth occlusion — **the only occluder there is**. `occlude` is an alias. ON by default |
+| `probe on\|off` `probe 0.6` | room reflections from ARCore's HDR cubemap; a number sets intensity |
+| `reflect on\|off` `reflect 0.3` | the floor mirror; a number sets its strength |
 | `catcher on\|off` | diagnostic: paint the shadow catcher by its shadow term — green lit, red shadowed |
 
 **`preview on` over the remote does NOT turn forced daylight on**, though the HUD's preview
@@ -164,6 +166,8 @@ BuildingAnchor / PreviewRoot / DebugAnchor   the thing we anchor to; ARCore owns
 | `DebugHud` | IMGUI instrument panel. No Canvas, no wiring, can't be broken by scene edits |
 | `LightingController` | sun position, light estimation, north alignment, forced daylight |
 | `DepthOcclusion` | the only occluder: ARCore's depth map, plus the CPU depth sampling that says whether it can reach the building |
+| `EnvironmentLighting` | ARCore's HDR room cubemap → scene reflections, instead of the stock skybox |
+| `GroundReflection` | planar floor mirror: mirrored camera → render texture → transparent quad |
 | `DebugCapture` | `capture` button: screenshot + full state dump to `persistentDataPath/captures` |
 | `AdaptiveQuality` | frame-time tiering, switches URP asset between Tier A/B/C |
 | `RemoteControl` | polls `command.txt` so the app can be nudged over adb without touching the phone |
@@ -346,6 +350,63 @@ that whole mechanism was removed on 2026-08-25.
 
 Evidence tables, the caveat that Streetscape Geometry is not formally the same dataset, and
 the `streetlevel` reproduction recipe: **`google-3d-coverage` skill**.
+
+## Grounding the model — reflections and room light
+
+Added 2026-08-25, from a photograph of the model standing on the office floor: evenly lit,
+no shadow, no reflection, mirroring a blue procedural sky in a grey room. Three separate
+causes, all now addressed, none of them the same mechanism.
+
+**Room reflections — `EnvironmentLighting`, `probe on|off`.** The scene shipped with
+`m_DefaultReflectionMode: 0` (Skybox) and **zero reflection probes**, so every reflective
+surface — the blue glass panel over the entrance most visibly — mirrored Unity's stock
+procedural sky. ARCore can supply the real thing: its Environmental HDR mode produces an HDR
+cubemap of the room, and AR Foundation 6.5 exposes it on Android through
+`AREnvironmentProbeManager` (`ARCoreEnvironmentProbeSubsystem` advertises
+`supportsAutomaticPlacement` and `supportsEnvironmentTextureHDR`, and its `Start()` is
+documented as "enabling the HDR Environmental Light Estimation"). Nothing here had ever asked
+for it. The newest probe's cubemap is published as `RenderSettings.customReflectionTexture`
+rather than relied on through probe volumes, so it reaches the model wherever it stands.
+
+*The manager must live on the XR Origin GameObject* — `ARTrackableManager` reads its
+`XROrigin` off its own object, so putting it on the camera or anywhere else silently fails.
+
+**Sun colour — `matchEstimatedColour`.** Under forced daylight the key light was pinned to
+pure **white** while ARCore was reporting the room as warm. A white-lit model in a warm room
+is one of the reasons it reads as pasted on. The estimate cannot be used raw — outdoors it
+came back as `RGBA(0.056, 0.091, 0.135)`, which renders the model nearly black — because it is
+a white-balance-style **correction, not a colour**. So only its HUE is taken: normalised so the
+largest channel is 1, then blended towards white by `estimatedColourStrength` (0.75). Forced
+daylight still owns brightness, or a dim room would undo it. `sun colour from` in the state
+dump says which path is live.
+
+**Floor mirror — `GroundReflection`, `reflect on|off`.** A planar reflection: a second camera
+mirrored through the model's base plane renders ONLY the model into a render texture, which a
+transparent quad on the floor reads back **in screen space** — so it lines up with the model
+above it without any projection maths. Three details are what make it work rather than nearly
+work:
+
+- **Inverted culling.** Mirroring a camera flips triangle winding, so without `GL.invertCulling`
+  the reflection shows the INSIDE of the model's far walls. URP renders this camera itself, so
+  the flag is set from `RenderPipelineManager.beginCameraRendering` and cleared on end.
+- **The floor quads hide from their own camera.** The reflection quad and the shadow catcher
+  share the model's layer and would otherwise reflect themselves. They are switched off for
+  that camera's pass — cheaper than spending a project layer, and a layer cannot be added
+  while the Editor holds `ProjectSettings` anyway.
+- **`Assets/Resources/GroundReflection.shader`**, not `Assets/Shaders/`. Same trap as the
+  shadow catcher: `Shader.Find` returns null on device for a shader no scene references,
+  because the build strips it. Anything under `Resources` is always included.
+
+Strength and fade are **material properties**, so a floor can be dialled in over adb for free
+rather than at a quarter of an hour per shader rebuild.
+
+Preview only, deliberately: outdoors there is no quad on the real pavement to reflect into and
+a floating rectangle of reflection would be worse than none.
+
+**The honest caveat: none of this replaces the missing shadow.** The model still casts nothing
+(see Open), and a reflection under an object with no contact shadow still reads as pasted. The
+experiment that would settle the shadow is already designed and costs one build — swap
+`ShadowGround`'s material for a stock URP **Lit** one, whose variants are never stripped.
 
 ## The desk simulator — built 2026-08-22, and REMOVED the same day
 

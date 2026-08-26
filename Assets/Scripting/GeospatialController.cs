@@ -457,12 +457,47 @@ public class GeospatialController : MonoBehaviour
         if (_previewRoot != null) CreateShadowGround(nudgeRoot);
 
         buildingLoader.LoadInto(alignmentRoot);
+
+        // The floor mirror goes on the same plane as the shadow catcher and is sized from the
+        // model, so it can only be built once the model has a size — BuildingLoader raises
+        // that. Preview only for now: outdoors there is no quad on the real pavement to
+        // reflect into, and a floating rectangle of reflection would be worse than none.
+        if (_previewRoot != null) StartCoroutine(BuildGroundReflectionWhenLoaded(nudgeRoot));
     }
 
     /// <summary>
     /// An invisible quad at the model's feet that draws only the shadow falling on it.
     /// Sized generously, because a low sun throws a shadow far longer than the footprint.
     /// </summary>
+    /// <summary>
+    /// Waits for the GLB before building the floor mirror, because the quad is sized from the
+    /// model's footprint and placed at its base — neither of which exists until glTFast has
+    /// finished and the sizing has been applied. Gives up rather than spinning forever if the
+    /// load fails, so a bad model cannot leave a coroutine running for the session.
+    /// </summary>
+    System.Collections.IEnumerator BuildGroundReflectionWhenLoaded(Transform parent)
+    {
+        float deadline = Time.time + 30f;
+
+        while (buildingLoader != null &&
+               buildingLoader.State != BuildingLoader.LoadState.Loaded &&
+               Time.time < deadline)
+            yield return null;
+
+        if (buildingLoader == null || buildingLoader.State != BuildingLoader.LoadState.Loaded)
+            yield break;
+
+        var reflection = FindAnyObjectByType<GroundReflection>();
+        if (reflection == null) yield break;
+
+        var bounds = buildingLoader.LocalBounds;
+        float footprint = Mathf.Max(bounds.size.x, bounds.size.z);
+
+        // Same plane the shadow catcher sits on: local y 0 of the nudge root is the model's
+        // base, because BuildingLoader recentres the model onto the anchor.
+        reflection.Build(parent, parent, footprint, 0f);
+    }
+
     void CreateShadowGround(Transform parent)
     {
         // Resources first, because it is the only source that survives a player build with

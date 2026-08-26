@@ -24,6 +24,8 @@ using UnityEngine;
 ///     scale 1.02      east -0.4      north +0.2      up 0      scalev 1.0
 ///     save            reset          clear           reload
 ///     preview on      sun on         aspect on
+///     probe on|off    room reflections from ARCore's HDR cubemap; `probe 0.6` sets strength
+///     reflect on|off  the floor mirror; `reflect 0.3` sets its strength
 ///     depth on|off    real-world depth occlusion — the only occluder there is.
 ///                     `occlude` is an alias for it; `cut` and `mesh` are gone with streetscape
 ///     quality a|b|c   pin a tier (auto off). quality auto resumes. quality + / - nudge
@@ -55,6 +57,8 @@ public class RemoteControl : MonoBehaviour
     [SerializeField] LightingController lighting;
     [SerializeField] BuildingLoader loader;
     [SerializeField] DepthOcclusion depth;
+    [SerializeField] EnvironmentLighting environment;
+    [SerializeField] GroundReflection reflection;
     [SerializeField] AdaptiveQuality quality;
 
     float _pollTimer;
@@ -79,6 +83,13 @@ public class RemoteControl : MonoBehaviour
         if (depth == null) depth = FindAnyObjectByType<DepthOcclusion>();
         if (depth == null) depth = gameObject.AddComponent<DepthOcclusion>();
         if (quality == null) quality = FindAnyObjectByType<AdaptiveQuality>();
+
+        // Same reasoning as the depth switch: added in code so the scene file, which the
+        // Editor holds open, never has to be touched to try one of these.
+        if (environment == null) environment = FindAnyObjectByType<EnvironmentLighting>();
+        if (environment == null) environment = gameObject.AddComponent<EnvironmentLighting>();
+        if (reflection == null) reflection = FindAnyObjectByType<GroundReflection>();
+        if (reflection == null) reflection = gameObject.AddComponent<GroundReflection>();
 
         Debug.Log($"[Remote] listening on {CommandPath}");
     }
@@ -232,6 +243,31 @@ public class RemoteControl : MonoBehaviour
                 geospatial.ShadowCatcherDebug = OnOff(arg);
                 return $"catcher debug {(geospatial.ShadowCatcherDebug ? "on" : "off")}";
 
+            // Room reflections: ARCore's HDR cubemap instead of the stock skybox.
+            case "probe":
+                if (environment == null) return "no environment lighting";
+                if (arg.Length > 0 && float.TryParse(arg, NumberStyles.Float,
+                                                     CultureInfo.InvariantCulture, out float pv))
+                {
+                    environment.Intensity = pv;
+                    return $"reflection intensity {environment.Intensity:F2}";
+                }
+                environment.Enabled = OnOff(arg);
+                return $"room reflections {(environment.Enabled ? "on" : "off")}";
+
+            // The floor mirror. A bare number sets its strength, which is the knob worth
+            // pushing twenty times against a real floor.
+            case "reflect":
+                if (reflection == null) return "no ground reflection";
+                if (arg.Length > 0 && float.TryParse(arg, NumberStyles.Float,
+                                                     CultureInfo.InvariantCulture, out float rv))
+                {
+                    reflection.Strength = rv;
+                    return $"reflection strength {reflection.Strength:F2}";
+                }
+                reflection.Enabled = OnOff(arg);
+                return $"ground reflection {(reflection.Enabled ? "on" : "off")}";
+
             case "sun":
                 if (lighting == null) return "no lighting";
                 lighting.ForceDaylight = OnOff(arg);
@@ -352,6 +388,8 @@ public class RemoteControl : MonoBehaviour
         if (loader != null) report.AppendLine(loader.StateReport);
         if (lighting != null) report.AppendLine(lighting.StateReport);
         if (depth != null) report.AppendLine(depth.StateReport);
+        if (environment != null) report.AppendLine(environment.StateReport);
+        if (reflection != null) report.AppendLine(reflection.StateReport);
         if (quality != null) report.AppendLine(quality.StateReport);
 
         return report.ToString();

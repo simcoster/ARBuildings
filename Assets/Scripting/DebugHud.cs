@@ -19,6 +19,8 @@ public class DebugHud : MonoBehaviour
     [SerializeField] BuildingLoader loader;
     [SerializeField] AdaptiveQuality quality;
     [SerializeField] DepthOcclusion depth;
+    [SerializeField] EnvironmentLighting environment;
+    [SerializeField] GroundReflection reflection;
 
     bool _visible = true;
     GUIStyle _label, _button, _box, _sliderTrack, _sliderThumb;
@@ -47,6 +49,8 @@ public class DebugHud : MonoBehaviour
         if (loader == null) loader = FindAnyObjectByType<BuildingLoader>();
         if (quality == null) quality = FindAnyObjectByType<AdaptiveQuality>();
         if (depth == null) depth = FindAnyObjectByType<DepthOcclusion>();
+        if (environment == null) environment = FindAnyObjectByType<EnvironmentLighting>();
+        if (reflection == null) reflection = FindAnyObjectByType<GroundReflection>();
     }
 
     // AlignmentNudge enables this too; the support is reference-counted, so both can.
@@ -207,7 +211,10 @@ public class DebugHud : MonoBehaviour
         // Where the streetscape mesh count used to sit. The depth range is the more useful
         // number: it says whether the only occluder left can reach the building or is about
         // to swallow it.
-        if (depth != null) text += depth.HudReadout + "\n\n";
+        if (depth != null) text += depth.HudReadout + "\n";
+        if (environment != null) text += environment.HudReadout + "\n";
+        if (reflection != null) text += reflection.HudReadout + "\n";
+        text += "\n";
 
         var placement = geospatial != null ? geospatial.GetComponent<BuildingPlacement>() : null;
         if (placement != null) text += placement.PlacementReadout + "\n\n";

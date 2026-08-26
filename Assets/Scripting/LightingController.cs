@@ -45,6 +45,19 @@ public class LightingController : MonoBehaviour
     [Tooltip("Estimated direction is per-frame and jitters. Lower = steadier shadow.")]
     [SerializeField] float estimatedLightSmoothing = 3f;
 
+    [Tooltip("Tint the sun with ARCore's estimated light COLOUR even under forced daylight. " +
+             "Forced daylight used to own colour outright, which pinned the key light to " +
+             "pure white while ARCore was reporting the room as warm — a white-lit model in " +
+             "a warm room is one of the reasons it reads as pasted on. The estimate is a " +
+             "white-balance-style correction, not an absolute colour, so it is normalised " +
+             "to preserve brightness and only its HUE is taken.")]
+    [SerializeField] bool matchEstimatedColour = true;
+
+    [Tooltip("How far towards the room's colour to go. 1 is the raw estimate; the estimate " +
+             "is noisy, and full strength on a strongly coloured room looks worse than half.")]
+    [Range(0f, 1f)]
+    [SerializeField] float estimatedColourStrength = 0.75f;
+
     [Header("North alignment")]
     [Tooltip("Optional. Found automatically. Needed to know which way Unity's +Z actually " +
              "points, without which the sun — and every shadow — is aimed arbitrarily.")]
@@ -204,6 +217,7 @@ public class LightingController : MonoBehaviour
         $"north offset       : {NorthOffsetDeg:F1} deg {(NorthKnown ? "(MEASURED from VPS)" : "(GUESSED - shadows meaningless)")}\n" +
         $"forced daylight    : {forceDaylight}\n" +
         $"sun light          : {(sunLight != null ? $"enabled={sunLight.enabled} intensity={sunLight.intensity:F2} colour={sunLight.color}" : "none")}\n" +
+        $"sun colour from    : {(forceDaylight ? (matchEstimatedColour ? $"ROOM HUE at {estimatedColourStrength:P0}" : "forced WHITE") : "raw estimate")}\n" +
         $"sun world forward  : {(sunLight != null ? sunLight.transform.forward.ToString() : "n/a")}\n" +
         $"sun direction from : {(forceDaylight ? (matchEstimatedLight && EstimatedLightTravel.HasValue ? "ROOM LIGHT (ARCore estimate)" : $"forced az/el {forcedSunAzimuth:F0}/{forcedSunElevation:F0}") : "computed solar position")}\n" +
         $"estimation mode    : {(cameraManager != null ? cameraManager.currentLightEstimation.ToString() : "no camera manager")}\n" +
@@ -415,6 +429,17 @@ public class LightingController : MonoBehaviour
             if (le.mainLightIntensityLumens.HasValue)
                 sunLight.intensity = le.mainLightIntensityLumens.Value / intensityDivisor;
         }
+        else if (sunLight != null && matchEstimatedColour && le.mainLightColor.HasValue)
+        {
+            // Forced daylight still owns BRIGHTNESS — a dim room would otherwise undo it and
+            // the model would go black, which is exactly what happens outdoors when the raw
+            // estimate is applied (RGBA(0.056, 0.091, 0.135) was measured on site). Only the
+            // hue is taken: the estimate is normalised so its largest channel is 1, which
+            // strips the brightness out of it and leaves the colour cast behind.
+            sunLight.color = Color.Lerp(Color.white,
+                                        NormaliseHue(le.mainLightColor.Value),
+                                        estimatedColourStrength);
+        }
 
         // Ambient � the L2 spherical harmonics are the useful part.
         if (le.ambientSphericalHarmonics.HasValue)
@@ -430,6 +455,19 @@ public class LightingController : MonoBehaviour
             $"est: {cameraManager.currentLightEstimation}\n" +
             $"exposure: {smoothedExposure:F2} EV\n" +
             $"sun: {(sunLight != null && sunLight.enabled ? "up" : "down")}";
+    }
+
+    /// <summary>
+    /// The colour cast of an estimate, with its brightness divided out — the largest channel
+    /// scaled to 1. ARCore's `mainLightColor` is a correction factor, not a colour: outdoors
+    /// it came back as RGBA(0.056, 0.091, 0.135), which used as a light colour renders the
+    /// model nearly black. What is worth keeping from it is the RATIO between the channels.
+    /// </summary>
+    static Color NormaliseHue(Color c)
+    {
+        float peak = Mathf.Max(c.r, Mathf.Max(c.g, c.b));
+        if (peak <= 0.0001f) return Color.white;
+        return new Color(c.r / peak, c.g / peak, c.b / peak, 1f);
     }
 
     // ------------------------------------------------------------ exposure
