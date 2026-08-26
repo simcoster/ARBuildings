@@ -283,6 +283,10 @@ public class DebugHud : MonoBehaviour
                 seg.Enabled = !seg.Enabled;
 
             GUI.backgroundColor = segBg;
+            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 7.2f, w * 0.22f, btnH),
+                           SemanticOcclusion.LabelOf(seg.Backend), _button))
+                seg.CycleBackend();
+            GUI.backgroundColor = segBg;
         }
 
         // --- reload site config, so a pushed buildings.json needs no rebuild ---
@@ -297,7 +301,7 @@ public class DebugHud : MonoBehaviour
             _captureResult = DebugCapture.Take(geospatial, loader, nudge, lighting, Placement);
 
         if (_captureResult != "")
-            GUI.Label(new Rect(w - pad - w * 0.42f, pad + btnH * 7.1f, w * 0.4f, btnH),
+            GUI.Label(new Rect(w - pad - w * 0.42f, pad + btnH * 8.4f, w * 0.4f, btnH),
                       _captureResult, _label);
 
         float previewY = qualityY + btnH * 1.25f;

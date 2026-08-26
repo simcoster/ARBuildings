@@ -114,14 +114,18 @@ Shader "Unlit/ARCoreBackgroundMasked"
 
 #ifdef ARCORE_ENVIRONMENT_DEPTH_ENABLED
                 float distance = texture(_EnvironmentDepth, tc).x;
-                if (_SegEnabled > 0.5)
-                {
-                    if (seg.a > 0.5 && DepthMayOcclude(distance))
-                        depth = ConvertDistanceToDepth(distance);
-                }
-                else if (DepthMayOcclude(distance))
-                {
+                // ARCore depth is the occluder the box already proved works. Seg used
+                // to REPLACE it with "only voted THING pixels", and a cardboard box is
+                // PASCAL class 0, so the mask was empty and nothing occluded.
+                if (DepthMayOcclude(distance))
                     depth = ConvertDistanceToDepth(distance);
+                if (_SegEnabled > 0.5 && seg.a > 0.004)
+                {
+                    float scale = _MaxOcclusionDistance > 0.0 ? _MaxOcclusionDistance : 16.0;
+                    float packed = seg.a * scale;
+                    float d = DepthMayOcclude(distance) ? min(distance, packed) : packed;
+                    if (d > 0.001)
+                        depth = ConvertDistanceToDepth(d);
                 }
 #endif
                 // Paint every THING the model labelled. Independent of depth so a
@@ -255,14 +259,15 @@ Shader "Unlit/ARCoreBackgroundMasked"
 
 #ifdef ARCORE_ENVIRONMENT_DEPTH_ENABLED
                 float distance = tex2D(_EnvironmentDepth, tc).x;
-                if (_SegEnabled > 0.5)
-                {
-                    if (seg.a > 0.5 && DepthMayOcclude(distance))
-                        depth = ConvertDistanceToDepth(distance);
-                }
-                else if (DepthMayOcclude(distance))
-                {
+                if (DepthMayOcclude(distance))
                     depth = ConvertDistanceToDepth(distance);
+                if (_SegEnabled > 0.5 && seg.a > 0.004)
+                {
+                    float scale = _MaxOcclusionDistance > 0.0 ? _MaxOcclusionDistance : 16.0;
+                    float packed = seg.a * scale;
+                    float d = DepthMayOcclude(distance) ? min(distance, packed) : packed;
+                    if (d > 0.001)
+                        depth = ConvertDistanceToDepth(d);
                 }
 #endif
                 if (_SegEnabled > 0.5 && dot(seg.rgb, float3(1, 1, 1)) > 0.05)

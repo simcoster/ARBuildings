@@ -7,13 +7,15 @@ import org.tensorflow.lite.nnapi.NnApiDelegate;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Locale;
 
 /**
- * NNAPI / ENN wrapper for a single-input image segmenter (or classifier).
+ * TFLite wrapper for a single-input image segmenter.
  *
- * npuOnly=true sets useNnapiCpu(false) and accelerator "enn". If ENN rejects the
- * graph the Interpreter constructor throws and we report REJECT — the same
- * CPU_DISABLED trap documented in tools/encoder_bench. Never silently fall back.
+ * Three backends, matching the A35 gate in docs/npu-model-matrix.md:
+ *   cpu  — XNNPACK only (~18 ms on this DeepLab)
+ *   gpu  — NNAPI hybrid (GPU/NPU/CPU as NNAPI picks, CPU fallback on)
+ *   npu  — NNAPI accelerator "enn", CPU disabled. Fail closed on REJECT.
  */
 public final class NpuSegmenter {
     private Interpreter interpreter;
@@ -40,22 +42,35 @@ public final class NpuSegmenter {
     public int outputChannels() { return outC; }
     public boolean ready() { return interpreter != null; }
 
-    public boolean loadBytes(byte[] model, boolean npuOnly) {
+    public boolean loadBytes(byte[] model, String backend) {
         close();
         if (model == null || model.length == 0) {
             lastError = "empty model bytes";
             ep = "REJECT";
             return false;
         }
+        String b = backend == null ? "npu" : backend.toLowerCase(Locale.US);
         try {
-            NnApiDelegate.Options opt = new NnApiDelegate.Options();
-            opt.setAcceleratorName("enn");
-            opt.setUseNnapiCpu(!npuOnly);
-            nnapi = new NnApiDelegate(opt);
-
             Interpreter.Options iopt = new Interpreter.Options();
-            iopt.addDelegate(nnapi);
-            iopt.setNumThreads(1);
+            iopt.setNumThreads(4);
+
+            if ("cpu".equals(b)) {
+                iopt.setUseXNNPACK(true);
+                ep = "xnnpack";
+            } else if ("gpu".equals(b)) {
+                NnApiDelegate.Options opt = new NnApiDelegate.Options();
+                opt.setUseNnapiCpu(true);
+                nnapi = new NnApiDelegate(opt);
+                iopt.addDelegate(nnapi);
+                ep = "nnapi-hybrid";
+            } else {
+                NnApiDelegate.Options opt = new NnApiDelegate.Options();
+                opt.setAcceleratorName("enn");
+                opt.setUseNnapiCpu(false);
+                nnapi = new NnApiDelegate(opt);
+                iopt.addDelegate(nnapi);
+                ep = "enn";
+            }
 
             ByteBuffer modelBuf = ByteBuffer.allocateDirect(model.length);
             modelBuf.order(ByteOrder.nativeOrder());
@@ -63,7 +78,6 @@ public final class NpuSegmenter {
 
             interpreter = new Interpreter(modelBuf, iopt);
             describe();
-            ep = npuOnly ? "enn" : "nnapi-hybrid";
             lastError = "";
             return true;
         } catch (Exception e) {
@@ -81,7 +95,6 @@ public final class NpuSegmenter {
         outType = out.dataType();
         int[] ish = in.shape();
         int[] osh = out.shape();
-        // [1,H,W,C] NHWC or [1,C,H,W] NCHW
         if (ish.length == 4 && ish[1] <= 4 && ish[2] > 4 && ish[3] > 4) {
             nchw = true;
             inC = ish[1];
@@ -163,7 +176,6 @@ public final class NpuSegmenter {
                         inBuf.put(rgb[i * 3 + c]);
             }
         } else {
-            // float32, 0..1
             if (!nchw) {
                 for (int i = 0; i < rgb.length; i++)
                     inBuf.putFloat((rgb[i] & 0xff) / 255f);
@@ -184,7 +196,7 @@ public final class NpuSegmenter {
             for (int i = 0; i < n; i++) {
                 if (outType == DataType.FLOAT32) {
                     float v = outBuf.getFloat();
-                    labelsOut[i] = v > 0.5f ? 15 : 0; // person vs stuff
+                    labelsOut[i] = v > 0.5f ? 15 : 0;
                 } else if (outType == DataType.INT32) {
                     labelsOut[i] = outBuf.getInt();
                 } else {
@@ -195,13 +207,12 @@ public final class NpuSegmenter {
         }
 
         if (outType == DataType.FLOAT32) {
-            float[] row = new float[outC];
             for (int i = 0; i < n; i++) {
                 int best = 0;
                 float bestV = -Float.MAX_VALUE;
                 for (int c = 0; c < outC; c++) {
-                    row[c] = outBuf.getFloat();
-                    if (row[c] > bestV) { bestV = row[c]; best = c; }
+                    float v = outBuf.getFloat();
+                    if (v > bestV) { bestV = v; best = c; }
                 }
                 labelsOut[i] = best;
             }

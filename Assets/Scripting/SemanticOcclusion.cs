@@ -25,8 +25,16 @@ public class SemanticOcclusion : MonoBehaviour
 {
     public const string DefaultModelFile = "deeplabv3_257_mv_gpu.tflite";
 
+    public enum SegBackend
+    {
+        Cpu,  // XNNPACK
+        Gpu,  // NNAPI hybrid (GPU/CPU)
+        Npu   // ENN, CPU disabled
+    }
+
     [SerializeField] bool enableOnStart;
     [SerializeField] string modelFile = DefaultModelFile;
+    [SerializeField] SegBackend backend = SegBackend.Npu;
     [SerializeField] int minVotePixels = 50;
     [SerializeField] float maxOcclusionDistance = 12f;
     [SerializeField] bool debugTint;
@@ -45,7 +53,10 @@ public class SemanticOcclusion : MonoBehaviour
     int[] _parent;
     int[] _votes;
     int[] _counts;
+    float[] _minDepth;
     float[] _depthM;
+    byte[] _modelBytes;
+    bool _reloading;
     int _depthW, _depthH;
     bool[] _isThing = BuildPascalThing();
 
@@ -100,11 +111,38 @@ public class SemanticOcclusion : MonoBehaviour
     }
 
     public bool NpuReady => _npu.Ready;
+    public bool UsingNpu => backend == SegBackend.Npu && _npu.Ready;
     public float LastInferenceMs => _npu.LastInferenceMs;
     public float InferIntervalSeconds => inferIntervalSeconds;
+    public SegBackend Backend => backend;
+
+    public string SetBackend(SegBackend next)
+    {
+        backend = next;
+        if (_modelBytes == null)
+            return $"seg backend {LabelOf(backend)} (model not loaded yet)";
+        if (_reloading)
+            return $"seg backend {LabelOf(backend)} (reload already running)";
+        StartCoroutine(ReloadBackend());
+        return $"seg backend {LabelOf(backend)} — reloading";
+    }
+
+    public string CycleBackend()
+    {
+        var next = backend == SegBackend.Cpu ? SegBackend.Gpu
+                 : backend == SegBackend.Gpu ? SegBackend.Npu
+                 : SegBackend.Cpu;
+        return SetBackend(next);
+    }
+
+    public static string LabelOf(SegBackend b) =>
+        b == SegBackend.Cpu ? "CPU" : b == SegBackend.Gpu ? "GPU" : "NPU";
+
+    static string BackendArg(SegBackend b) =>
+        b == SegBackend.Cpu ? "cpu" : b == SegBackend.Gpu ? "gpu" : "npu";
 
     public string HudReadout =>
-        $"seg: {(enableOnStart ? "ON" : "OFF")} overlay {(debugTint ? "ON" : "off")} " +
+        $"seg: {(enableOnStart ? "ON" : "OFF")} {LabelOf(backend)} overlay {(debugTint ? "ON" : "off")} " +
         $"{_npu.Ep} {_npu.LastInferenceMs:F1}ms\n" +
         $"  {_loadNote}";
 
@@ -114,6 +152,7 @@ public class SemanticOcclusion : MonoBehaviour
         {
             var r = new StringBuilder();
             r.AppendLine($"seg occlusion      : {(enableOnStart ? "ON" : "OFF")}");
+            r.AppendLine($"seg backend        : {LabelOf(backend)} ({BackendArg(backend)})");
             r.AppendLine($"seg model          : {modelFile}");
             r.AppendLine($"seg EP             : {_npu.Ep}");
             r.AppendLine($"seg ready          : {_npu.Ready}");
@@ -169,7 +208,7 @@ public class SemanticOcclusion : MonoBehaviour
 
     void Update()
     {
-        if (!enableOnStart || !_npu.Ready) return;
+        if (!enableOnStart || !_npu.Ready || _reloading) return;
         _inferTimer += Time.deltaTime;
         if (_inferTimer < inferIntervalSeconds) return;
         _inferTimer = 0f;
@@ -202,21 +241,36 @@ public class SemanticOcclusion : MonoBehaviour
             _loadNote = $"apk {modelFile} {bytes.Length} bytes";
         }
 
-        bool ok = _npu.Load(bytes, npuOnly: true);
+        _modelBytes = bytes;
+        yield return BindInterpreter();
+    }
+
+    IEnumerator ReloadBackend()
+    {
+        yield return BindInterpreter();
+        if (enableOnStart && _npu.Ready) InferOnce();
+    }
+
+    IEnumerator BindInterpreter()
+    {
+        _reloading = true;
+        bool ok = _npu.Load(_modelBytes, BackendArg(backend));
         if (!ok)
         {
-            _loadNote = $"ENN REJECT {_npu.LastError}";
-            enableOnStart = false;
+            _loadNote = $"{LabelOf(backend)} REJECT {_npu.LastError}";
             ApplyMaterialFlags();
-            Debug.LogWarning($"[Seg] NPU refused the graph — leaving depth unmasked. {_npu.LastError}");
+            Debug.LogWarning($"[Seg] {LabelOf(backend)} refused the graph. {_npu.LastError}");
+            _reloading = false;
             yield break;
         }
 
         Allocate(_npu.OutputWidth, _npu.OutputHeight);
         ConfigureThingTable(_npu.OutputChannels);
-        _loadNote = $"enn {_npu.InputWidth}x{_npu.InputHeight} -> {_npu.OutputWidth}x{_npu.OutputHeight}";
-        Debug.Log($"[Seg] loaded on ENN: {_loadNote}");
+        _loadNote = $"{LabelOf(backend)} {_npu.Ep} {_npu.InputWidth}x{_npu.InputHeight} -> {_npu.OutputWidth}x{_npu.OutputHeight}";
+        Debug.Log($"[Seg] loaded: {_loadNote}");
         ApplyMaterialFlags();
+        _reloading = false;
+        yield return null;
     }
 
     void Allocate(int w, int h)
@@ -226,6 +280,7 @@ public class SemanticOcclusion : MonoBehaviour
         _parent = new int[w * h];
         _votes = new int[w * h];
         _counts = new int[w * h];
+        _minDepth = new float[w * h];
         _rgb = new byte[_npu.InputWidth * _npu.InputHeight * 3];
         if (_maskTex != null) Destroy(_maskTex);
         _maskTex = new Texture2D(w, h, TextureFormat.RGBA32, false, false)
@@ -304,6 +359,7 @@ public class SemanticOcclusion : MonoBehaviour
         Array.Clear(_overlay, 0, _overlay.Length);
         Array.Clear(_votes, 0, n);
         Array.Clear(_counts, 0, n);
+        Array.Clear(_minDepth, 0, n);
         _lastThingPixels = _lastStuffPixels = _lastExpanded = _lastComponents = 0;
 
         for (int i = 0; i < n; i++)
@@ -336,7 +392,14 @@ public class SemanticOcclusion : MonoBehaviour
                 if (!IsThing(_labels[i])) continue;
                 int root = Find(i);
                 _counts[root]++;
-                if (PixelVotes(x, y, w, h)) _votes[root]++;
+                float metres = DepthAt(x, y, w, h);
+                if (metres > 0f &&
+                    (maxOcclusionDistance <= 0f || metres < maxOcclusionDistance))
+                {
+                    _votes[root]++;
+                    if (_minDepth[root] <= 0f || metres < _minDepth[root])
+                        _minDepth[root] = metres;
+                }
             }
         }
 
@@ -356,21 +419,27 @@ public class SemanticOcclusion : MonoBehaviour
             _overlay[o] = paint.r;
             _overlay[o + 1] = paint.g;
             _overlay[o + 2] = paint.b;
-            _overlay[o + 3] = _votes[root] >= minVotePixels ? (byte)255 : (byte)0;
+            if (_votes[root] >= minVotePixels && _minDepth[root] > 0f)
+            {
+                float scale = maxOcclusionDistance > 0f ? maxOcclusionDistance : 16f;
+                _overlay[o + 3] = (byte)Mathf.Clamp(
+                    Mathf.RoundToInt(_minDepth[root] / scale * 255f), 1, 255);
+            }
+            else
+            {
+                _overlay[o + 3] = 0;
+            }
         }
     }
 
-    bool PixelVotes(int x, int y, int w, int h)
+    float DepthAt(int x, int y, int w, int h)
     {
-        if (_depthW <= 0) return false;
+        if (_depthW <= 0) return 0f;
         float u = (x + 0.5f) / w;
         float v = (y + 0.5f) / h;
         int dx = Mathf.Clamp((int)(u * _depthW), 0, _depthW - 1);
         int dy = Mathf.Clamp((int)(v * _depthH), 0, _depthH - 1);
-        float metres = _depthM[dy * _depthW + dx];
-        if (metres <= 0f) return false;
-        if (maxOcclusionDistance > 0f && metres >= maxOcclusionDistance) return false;
-        return true;
+        return _depthM[dy * _depthW + dx];
     }
 
     bool IsThing(int cls) => cls >= 0 && cls < _isThing.Length && _isThing[cls];
@@ -413,11 +482,11 @@ public class SemanticOcclusion : MonoBehaviour
         _isThing = channels == 19 ? BuildCityscapesThing() : BuildPascalThing();
     }
 
-    /// <summary>PASCAL VOC: only countable objects. Background (0) is plaza/road/building/sky.</summary>
+    /// <summary>PASCAL VOC: every labelled object. Class 0 is plaza/road/building/sky.</summary>
     static bool[] BuildPascalThing()
     {
         var t = new bool[256];
-        foreach (int id in new[] { 1, 2, 4, 6, 7, 14, 15, 19 })
+        for (int id = 1; id <= 20; id++)
             t[id] = true;
         return t;
     }

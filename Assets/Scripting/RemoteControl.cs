@@ -26,7 +26,8 @@ using UnityEngine;
 ///     preview on      sun on         aspect on
 ///     depth on|off    real-world depth occlusion — the only occluder there is.
 ///                     `occlude` is an alias for it; `cut` and `mesh` are gone with streetscape
-///     seg on|off      NPU semantic expansion of that depth (whole object, never the floor)
+///     seg on|off      semantic expansion of depth (whole object). ARCore depth stays.
+///     seg cpu|gpu|npu interpreter backend: XNNPACK / NNAPI-hybrid / ENN
 ///     segmin N        pixels of ARCore-depth overlap before a segment is expanded
 ///     segdebug on|off tint accepted segments
 ///     segmax N        max occlusion distance in metres (0 = no cap)
@@ -234,8 +235,15 @@ public class RemoteControl : MonoBehaviour
 
             case "seg":
                 if (seg == null) return "no semantic occlusion";
-                seg.Enabled = OnOff(arg);
-                return $"seg {(seg.Enabled ? "on" : "off")} (overlay {(seg.Enabled ? "on" : "off")})";
+                switch (arg.ToLowerInvariant())
+                {
+                    case "cpu": return seg.SetBackend(SemanticOcclusion.SegBackend.Cpu);
+                    case "gpu": return seg.SetBackend(SemanticOcclusion.SegBackend.Gpu);
+                    case "npu": return seg.SetBackend(SemanticOcclusion.SegBackend.Npu);
+                    default:
+                        seg.Enabled = OnOff(arg);
+                        return $"seg {(seg.Enabled ? "on" : "off")} {SemanticOcclusion.LabelOf(seg.Backend)}";
+                }
 
             case "segmin":
                 if (seg == null) return "no semantic occlusion";

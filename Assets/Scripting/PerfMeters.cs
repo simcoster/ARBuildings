@@ -288,9 +288,16 @@ public class PerfMeters : MonoBehaviour
         }
 
         if (_seg == null) _seg = FindAnyObjectByType<SemanticOcclusion>();
-        if (_seg == null || !_seg.NpuReady || !_seg.Enabled)
+        if (_seg == null || !_seg.Enabled)
         {
-            SetNpu(0f, _seg == null ? "no seg" : !_seg.NpuReady ? "not loaded" : "seg off");
+            SetNpu(0f, _seg == null ? "no seg" : "seg off");
+            return;
+        }
+
+        // CPU / GPU backends are not the NPU. Don't paint the NPU bar with their duty.
+        if (!_seg.UsingNpu)
+        {
+            SetNpu(0f, SemanticOcclusion.LabelOf(_seg.Backend).ToLowerInvariant());
             return;
         }
 

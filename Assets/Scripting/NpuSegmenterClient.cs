@@ -22,14 +22,14 @@ public sealed class NpuSegmenterClient : IDisposable
     AndroidJavaObject _java;
 #endif
 
-    public bool Load(byte[] modelBytes, bool npuOnly)
+    public bool Load(byte[] modelBytes, string backend)
     {
         Dispose();
 #if UNITY_ANDROID && !UNITY_EDITOR
         try
         {
             _java = new AndroidJavaObject("com.pavel.arbuildings.NpuSegmenter");
-            bool ok = _java.Call<bool>("loadBytes", modelBytes, npuOnly);
+            bool ok = _java.Call<bool>("loadBytes", modelBytes, backend ?? "npu");
             LastError = _java.Call<string>("lastError") ?? "";
             Ep = _java.Call<string>("ep") ?? "REJECT";
             if (!ok)
