@@ -283,9 +283,13 @@ public class DebugHud : MonoBehaviour
                 seg.Enabled = !seg.Enabled;
 
             GUI.backgroundColor = segBg;
+            // Cycles the models instead of the backends: the accelerator stopped mattering
+            // for frame rate once inference moved off the render thread, and which model is
+            // loaded is now the only comparison worth a button. `seg cpu|gpu|npu` still
+            // exists over RemoteControl.
             if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 7.2f, w * 0.22f, btnH),
-                           SemanticOcclusion.LabelOf(seg.Backend), _button))
-                seg.CycleBackend();
+                           seg.ModelLabel, _button))
+                seg.CycleModel();
             GUI.backgroundColor = segBg;
         }
 

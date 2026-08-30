@@ -111,14 +111,19 @@ Shader "Unlit/ARCoreBackgroundMasked"
                 vec3 result = texture(_MainTex, tc).xyz;
                 float depth = 1.0;
                 vec4 seg = texture(_SemanticMask, tc);
+                float distance = 0.0;
 
 #ifdef ARCORE_ENVIRONMENT_DEPTH_ENABLED
-                float distance = texture(_EnvironmentDepth, tc).x;
+                distance = texture(_EnvironmentDepth, tc).x;
                 // ARCore depth is the occluder the box already proved works. Seg used
                 // to REPLACE it with "only voted THING pixels", and a cardboard box is
                 // PASCAL class 0, so the mask was empty and nothing occluded.
                 if (DepthMayOcclude(distance))
                     depth = ConvertDistanceToDepth(distance);
+#endif
+                // Packed mask alpha is a distance, independent of whether ARCore depth
+                // is on: a matte has to punch a hole even when the depth texture is
+                // stale or disabled, or the overlay tints and the building still draws.
                 if (_SegEnabled > 0.5 && seg.a > 0.004)
                 {
                     float scale = _MaxOcclusionDistance > 0.0 ? _MaxOcclusionDistance : 16.0;
@@ -127,7 +132,6 @@ Shader "Unlit/ARCoreBackgroundMasked"
                     if (d > 0.001)
                         depth = ConvertDistanceToDepth(d);
                 }
-#endif
                 // Paint every THING the model labelled. Independent of depth so a
                 // `seg on` toggle is visible even if occlusion is off.
                 if (_SegEnabled > 0.5 && dot(seg.rgb, vec3(1.0)) > 0.05)
@@ -256,11 +260,13 @@ Shader "Unlit/ARCoreBackgroundMasked"
                 float3 result = tex2D(_MainTex, tc).xyz;
                 float depth = 1.0;
                 float4 seg = tex2D(_SemanticMask, tc);
+                float distance = 0.0;
 
 #ifdef ARCORE_ENVIRONMENT_DEPTH_ENABLED
-                float distance = tex2D(_EnvironmentDepth, tc).x;
+                distance = tex2D(_EnvironmentDepth, tc).x;
                 if (DepthMayOcclude(distance))
                     depth = ConvertDistanceToDepth(distance);
+#endif
                 if (_SegEnabled > 0.5 && seg.a > 0.004)
                 {
                     float scale = _MaxOcclusionDistance > 0.0 ? _MaxOcclusionDistance : 16.0;
@@ -269,7 +275,6 @@ Shader "Unlit/ARCoreBackgroundMasked"
                     if (d > 0.001)
                         depth = ConvertDistanceToDepth(d);
                 }
-#endif
                 if (_SegEnabled > 0.5 && dot(seg.rgb, float3(1, 1, 1)) > 0.05)
                     result = lerp(result, seg.rgb, 0.55);
 

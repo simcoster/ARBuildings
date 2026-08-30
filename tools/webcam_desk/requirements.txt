@@ -1,0 +1,3 @@
+opencv-python
+numpy
+# Interpreter: ai-edge-litert (already on this machine) or tensorflow

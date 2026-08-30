@@ -434,6 +434,34 @@ ever written again: Metal has **no geometry stage at all** and Mali support is s
 **A Unity Quad's normal is +Z.** `Euler(90,0,0)` points it down (back-face culled, invisible);
 `Euler(-90,0,0)` points it up.
 
+**On-device inference: three faults that each produce a believable wrong answer.**
+All three were found on 2026-08-26 while comparing segmentation models; full tables in
+`docs/npu-model-matrix.md` (Canny, S24 GPU numbers, and the dummy-CNN size sweep
+are in the same file, 2026-08-26–30 section).
+
+- *Blocking inference makes frame time equal inference time.* A JNI `interpreter.run` from
+  `Update` cost the whole frame: 33 ms with segmentation off, 60–106 ms on, always ≈ the
+  inference. It reads as "this accelerator is slow" and it is really "the caller is
+  blocked" — it penalises every backend equally, so no amount of model or delegate
+  shopping can fix it. `NpuSegmenter` owns a worker thread now (`submit` / `pollLabels`),
+  and frame time went back to 33.4 ms with a 90 ms model. **Suspect this before believing
+  any on-device timing comparison.**
+- *`XRCpuImage.Convert` only DOWNSAMPLES.* The camera CPU image is 640×480, so any model
+  with a larger input throws `Converted image height must be less than or equal to native
+  image height` once per frame — and the state dump then keeps reporting the PREVIOUS
+  model's numbers. Three models printing byte-identical pixel counts is what exposed it.
+  Convert to the largest size that fits, then rescale.
+- *A one-channel model output is a label map, and the integer width must match.* DeepLab
+  513's exported `ArgMax` is **INT64**. Read a byte at a time it gives a label followed by
+  seven zeros, which decodes as "every pixel is background" — identical to a model that
+  detects nothing, and it nearly got the best candidate written off. Always print dtype
+  and bytes-per-pixel (`seg output tensor`).
+
+**Unity's JNI never copies an array out-parameter back.** A managed `int[]`/`byte[]` passed
+to a Java method is copied INTO a fresh Java array; writes on the Java side are discarded.
+An `infer(rgb, labelsOut)` signature therefore leaves the caller's buffer untouched, which
+looks exactly like a model that labels nothing. **Return the array instead.**
+
 **Polling touch phases misses taps.** `Touch.activeTouches` with `phase == Began` misses any
 tap that starts and ends between two `Update` calls — about 5 in 6 at 30 fps. Use the
 `Touch.onFingerDown` event.

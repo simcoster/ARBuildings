@@ -26,11 +26,25 @@ using UnityEngine;
 ///     preview on      sun on         aspect on
 ///     depth on|off    real-world depth occlusion — the only occluder there is.
 ///                     `occlude` is an alias for it; `cut` and `mesh` are gone with streetscape
-///     seg on|off      semantic expansion of depth (whole object). ARCore depth stays.
-///     seg cpu|gpu|npu interpreter backend: XNNPACK / NNAPI-hybrid / ENN
+///     seg on|off      semantic occlusion. PASCAL things expand ARCore depth; alpha
+///                     mattes (MODNet) occlude from the silhouette even without a depth hit.
+///     seg cpu|gpu|npu|gpudec  interpreter: XNNPACK / NNAPI-hybrid / ENN / Mali GpuDelegate
+///     segint N        seconds between submits (0 = as soon as the worker is free)
 ///     segmin N        pixels of ARCore-depth overlap before a segment is expanded
 ///     segdebug on|off tint accepted segments
 ///     segmax N        max occlusion distance in metres (0 = no cap)
+///     segbox on|off   occlude the whole bounding box of an object, not its silhouette
+///     segrot N        rotate the camera image N deg clockwise before inference (0/90/180/270)
+///     segcrop on|off  centred square crop instead of squashing the whole frame
+///     segdump         write the exact image the network was handed, and its mask, as PNGs
+///     segmodel FILE   swap the .tflite at runtime — pair it with pushing one to the device
+///                     `canny` is built in (CPU edges, no file)
+///     segnext         next model in the cycle — the same order as the HUD's model button
+///     seglist         every model available, shipped or pushed, and which is live
+///     segxnn on|off   XNNPACK, or TFLite's built-in kernels for graphs XNNPACK refuses
+///     segnorm M S     input normalisation (v-M)/S. 127.5 127.5 for DeepLab, 0 255 for [0,1]
+///     segkind K       auto|labels|alpha|depth — how to read a one-channel float output
+///     segfloor N      0-255 threshold on the scalar view; raise it to isolate a peak
 ///     quality a|b|c   pin a tier (auto off). quality auto resumes. quality + / - nudge
 ///     recenter        capture        state
 ///
@@ -239,11 +253,19 @@ public class RemoteControl : MonoBehaviour
                 {
                     case "cpu": return seg.SetBackend(SemanticOcclusion.SegBackend.Cpu);
                     case "gpu": return seg.SetBackend(SemanticOcclusion.SegBackend.Gpu);
+                    case "gpudec": return seg.SetBackend(SemanticOcclusion.SegBackend.GpuDec);
                     case "npu": return seg.SetBackend(SemanticOcclusion.SegBackend.Npu);
                     default:
                         seg.Enabled = OnOff(arg);
                         return $"seg {(seg.Enabled ? "on" : "off")} {SemanticOcclusion.LabelOf(seg.Backend)}";
                 }
+
+            case "segint":
+                if (seg == null) return "no semantic occlusion";
+                if (arg.Length == 0) return $"segint {seg.InferIntervalSeconds:F3}";
+                if (!float.TryParse(arg, NumberStyles.Float, CultureInfo.InvariantCulture, out float segInt))
+                    return $"ERROR '{arg}' is not a number";
+                return seg.SetInferInterval(segInt);
 
             case "segmin":
                 if (seg == null) return "no semantic occlusion";
@@ -257,6 +279,72 @@ public class RemoteControl : MonoBehaviour
                 if (seg == null) return "no semantic occlusion";
                 seg.DebugTint = OnOff(arg);
                 return $"segdebug {(seg.DebugTint ? "on" : "off")}";
+
+            // The CPU image arrives in sensor orientation, so an upright object reaches the
+            // network lying down. Which quarter turn corrects it is a device fact, so it is
+            // a knob: dialling it is free, rebuilding to try the other one is not.
+            case "segrot":
+                if (seg == null) return "no semantic occlusion";
+                if (arg.Length == 0) return $"segrot {seg.RotationDegrees}";
+                if (!int.TryParse(arg, NumberStyles.Integer, CultureInfo.InvariantCulture, out int rotDeg))
+                    return $"ERROR '{arg}' is not an int";
+                seg.RotationDegrees = rotDeg;
+                return $"segrot {seg.RotationDegrees} deg clockwise before inference";
+
+            case "segcrop":
+                if (seg == null) return "no semantic occlusion";
+                seg.CentreCrop = OnOff(arg);
+                return $"segcrop {(seg.CentreCrop ? "on — centred square, no squash" : "off — whole frame squashed")}";
+
+            case "segdump":
+                if (seg == null) return "no semantic occlusion";
+                return seg.DumpInput();
+
+            case "segmodel":
+                if (seg == null) return "no semantic occlusion";
+                return seg.SetModel(arg);
+
+            case "segnext":
+                if (seg == null) return "no semantic occlusion";
+                return seg.CycleModel();
+
+            case "seglist":
+                if (seg == null) return "no semantic occlusion";
+                return seg.ListModels();
+
+            case "segxnn":
+                if (seg == null) return "no semantic occlusion";
+                seg.UseXnnpack = OnOff(arg);
+                return $"segxnn {(seg.UseXnnpack ? "on (XNNPACK)" : "off (TFLite built-in kernels)")}";
+
+            case "segbox":
+                if (seg == null) return "no semantic occlusion";
+                seg.BoundingBox = OnOff(arg);
+                return $"segbox {(seg.BoundingBox ? "on — whole box occludes" : "off — silhouette occludes")}";
+
+            // (v - mean) / scale. DeepLab float32 wants 127.5 127.5; 0 255 is the [0,1]
+            // reading that returns background everywhere and looks like a blind model.
+            case "segnorm":
+                if (seg == null) return "no semantic occlusion";
+                if (parts.Length < 3) return "ERROR segnorm needs <mean> <scale>";
+                if (!float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float nMean) ||
+                    !float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float nScale))
+                    return $"ERROR '{parts[1]} {parts[2]}' is not two numbers";
+                return seg.SetNormalization(nMean, nScale);
+
+            // A matte and a depth map are both [1,H,W,1] FLOAT32, so the shape cannot tell
+            // them apart. auto guesses from the observed range; this overrides the guess.
+            case "segkind":
+                if (seg == null) return "no semantic occlusion";
+                return seg.SetOutputKind(arg);
+
+            // Threshold on the scalar view. A compressed sigmoid needs this raised before
+            // the peak can be told from the floor it is sitting on.
+            case "segfloor":
+                if (seg == null) return "no semantic occlusion";
+                if (!int.TryParse(arg, out int sFloor))
+                    return $"ERROR '{arg}' is not a number 0-255";
+                return seg.SetScalarFloor(sFloor);
 
             case "segmax":
                 if (seg == null) return "no semantic occlusion";

@@ -4,7 +4,12 @@ results*.json
 __pycache__/
 iso_*.json
 npu_models/
+cnn_models/
+occ_models/
+occ_compare/
+_modnet/
 android/benchmark_model
 android/tflite_aar/
 npu_gate_raw.txt
+cnn_gpu_bench_raw.txt
 
