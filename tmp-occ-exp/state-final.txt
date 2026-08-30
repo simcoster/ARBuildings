@@ -1,0 +1,86 @@
+# state 2026-08-26 17:31:59
+build stamp        : 2026-08-26 17:29:27
+site id            : synagogue-01
+phase              : WaitingForEarth
+readout            : EarthState: Enabled | tracking: None | location: DISABLED on device — turn Location on | Point at building facades and walk sideways
+configured lat/lng : 32.0837890, 34.8145810
+altitude above ter : 0
+location service   : DISABLED on device — turn Location on
+earth state        : Enabled
+earth tracking     : None
+can save coords    : nothing placed yet
+preview active     : False
+
+adjust site        : 
+adjust rot         : 0.00 deg
+adjust scale       : 1.000x wide / 1.000x tall (aspect LOCKED)
+adjust E / N / up  : 0.00 / 0.00 / 0.00 m
+baked coordinates  : none
+unsaved changes    : False
+last save message  : 
+adjustments file   : /storage/emulated/0/Android/data/com.pavel.arbuildings/files/adjustments.json
+
+model file         : synagogue.glb
+load state         : Idle ()
+renderers          : 0
+material shaders   : unknown
+size mode          : FootprintWidth (axis Z, target 10 m)
+applied scale      : x1.0000
+recenter on anchor : True
+model height       : 0.00 m (alignment-root metres)
+world bounds@load  : 0.0 x 0.0 x 0.0 m
+cull bounds now    : no model
+
+sun computed az/el : 269.5 / 20.4 deg
+north offset       : 0.0 deg (GUESSED - shadows meaningless)
+forced daylight    : False
+sun light          : enabled=True intensity=2.00 colour=RGBA(0.943, 1.092, 1.119, 1.000)
+sun world forward  : (0.94, -0.35, 0.01)
+sun direction from : computed solar position
+estimation mode    : AmbientSphericalHarmonics, MainLightDirection, MainLightIntensity
+estimated dir      : (0.54, -0.57, 0.62)
+estimated lumens   : 0
+estimated colour   : RGBA(0.943, 1.092, 1.119, 1.000)
+ambient lobes      : 2 (directionality 1.46x)
+exposure           : 0.00 EV (driven True)
+intensity divisor  : 1000
+
+depth occlusion    : ON
+depth manager      : enabled=True (the lever — a disabled manager clears the background keyword)
+depth requested    : Fastest, preference PreferEnvironmentOcclusion
+depth current      : Fastest, preference PreferEnvironmentOcclusion
+depth texture      : 160x90 — a depth image IS being produced, and the background pass writes it into the buffer
+depth at centre    : 0.00 m at centre | NO valid samples in 240 | 160x90 DepthUint16
+
+seg occlusion      : ON
+seg backend        : CPU (cpu)
+seg model          : deeplabv3_257_mv_gpu.tflite
+seg EP             : xnnpack
+seg ready          : True
+seg load           : CPU xnnpack 257x257 -> 257x257
+seg last error     : 
+seg inference      : 64.49 ms
+seg input          : 257x257
+seg convert        : 257x257 native, no rescale
+seg camera image   : 640x480 -> centred square, no squash
+seg rotation       : 90 deg clockwise before inference
+seg mask texture   : 343x257 covering the frame, inset +43,+0
+seg labels         : 257x257 c=21
+seg output tensor  : FLOAT32 257x257x21 5548116 bytes, 84 per pixel
+seg normalisation  : (v-127.5)/127.5
+segmin             : 50 px
+seg max distance   : 12.0 m
+seg occluder shape : silhouette mask
+seg debug          : ON
+seg classes: background=66049
+seg thing/stuff    : 0 / 66049 px
+seg components     : 0 expanded 0
+seg mask           : 343x257
+
+quality: AUTO B  33.5 ms / 36 drop / 28 recover
+  shadows 100 m (TierB_RPAsset, 2 casc) - start B (auto)
+  auto on  quality level 1
+  pipeline TierB_RPAsset
+cpu                : 21% (proc/self)
+gpu                : 28% (gpu_busy)
+npu                : 0% (cpu)

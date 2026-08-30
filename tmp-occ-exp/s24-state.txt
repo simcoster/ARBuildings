@@ -1,0 +1,80 @@
+# state 2026-08-23 21:49:51
+build stamp        : 2026-08-23 21:20:46
+site id            : synagogue-01
+phase              : Placed
+readout            : anchor resolved
+configured lat/lng : 32.0837890, 34.8145810
+altitude above ter : 0
+location service   : Running
+earth state        : Enabled
+earth tracking     : Tracking
+camera lat/lng     : 32.0841845, 34.8146805
+camera altitude    : 49.67 m
+camera heading     : -34.5 deg
+horiz accuracy     : 4.82 m (gate 5)
+yaw accuracy       : 3.7 deg (gate 15)
+can save coords    : GPS ±4.8 m — ready
+preview active     : False
+anchor world pos   : (127.92, 0.33, -76.61)
+anchor distance    : 124.4 m
+anchor trackable   : none (plain transform — cannot be deactivated)
+shadow ground      : ABSENT
+catcher debug      : False
+
+adjust site        : synagogue-01
+adjust rot         : -0.95 deg
+adjust scale       : 0.401x wide / 0.401x tall (aspect LOCKED)
+adjust E / N / up  : 0.00 / 0.00 / 0.00 m
+baked coordinates  : 32.0833839, 34.8156047
+unsaved changes    : True
+last save message  : saved + coords 32.083384,34.815605
+adjustments file   : /storage/emulated/0/Android/data/com.pavel.arbuildings/files/adjustments.json
+
+model file         : synagogue.glb
+load state         : Loaded (17 renderers)
+renderers          : 17
+material shaders   : Shader Graphs/glTF-pbrSpecularGlossiness, Shader Graphs/glTF-pbrMetallicRoughness
+size mode          : FootprintWidth (axis Z, target 10 m)
+applied scale      : x1.8701
+recenter on anchor : True
+model height       : 15.92 m (alignment-root metres)
+world bounds@load  : 57.3 x 28.0 x 66.5 m
+cull bounds now    : centre (131.61, 3.52, -83.09), size 13.1 x 6.4 x 15.2 m, 0.87 m from where it is drawn
+
+sun computed az/el : 308.8 / -30.0 deg
+north offset       : -28.3 deg (MEASURED from VPS)
+forced daylight    : False
+sun light          : enabled=False intensity=1.40 colour=RGBA(0.424, 0.396, 0.338, 1.000)
+sun world forward  : (0.95, -0.28, 0.09)
+sun direction from : computed solar position
+estimation mode    : AmbientSphericalHarmonics, MainLightDirection, MainLightIntensity
+estimated dir      : (0.04, -0.90, 0.43)
+estimated lumens   : 0
+estimated colour   : RGBA(0.424, 0.396, 0.338, 1.000)
+ambient lobes      : 2 (directionality 1.35x)
+exposure           : 0.00 EV (driven True)
+intensity divisor  : 1000
+
+streetscape meshes : 27
+by type            : building=24 terrain=3 other=0 unresolved=0
+target coverage    : nearest 47.0 m - all elsewhere, NOT reconstructed
+    24 building, 0 overlapping, 0 within 15 m
+ghosted meshes     : 0  (only possible where a Building mesh exists)
+occluders enabled  : False
+renderers drawing  : 27 of 27  (0 = nothing can hide the model)
+occluder cutout    : on, 29.6 x 18.7 x 39.1 m
+ghosting enabled   : True
+target anchor set  : True
+visualise meshes   : True
+materials          : occluder=True ghost=True debug=True
+
+depth occlusion    : OFF
+depth manager      : enabled=False (the lever — a disabled manager clears the background keyword)
+depth requested    : Disabled, preference NoOcclusion
+depth current      : Disabled, preference NoOcclusion
+depth texture      : none
+
+quality: AUTO C  93.5 ms / 36 drop / 28 recover
+  shadows 60 m (TierC_RPAsset, 1 casc) - from A, dropped 2x, recovered 0x, at floor
+  auto on  quality level 2
+  pipeline TierC_RPAsset

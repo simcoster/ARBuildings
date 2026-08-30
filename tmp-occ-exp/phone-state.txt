@@ -1,0 +1,100 @@
+# state 2026-08-27 00:40:02
+build stamp        : 2026-08-27 00:33:33
+site id            : synagogue-01
+phase              : Placed
+readout            : preview: placed by hand, not by VPS | VPS: None — no fix yet | location service: DISABLED on device — turn Location on
+configured lat/lng : 32.0837890, 34.8145810
+altitude above ter : 0
+location service   : DISABLED on device — turn Location on
+earth state        : Enabled
+earth tracking     : None
+can save coords    : no VPS fix — point at facades and walk sideways
+preview active     : True
+preview            : PREVIEW: as seen from 120 m |   on floor 2.0 m away at 1:59
+last placement     : plane
+anchor world pos   : (1.04, 0.17, 1.98)
+anchor distance    : 2.3 m
+anchor trackable   : Tracking, active=True, pending=False
+shadow ground      : y at (1.04, 0.17, 1.98), world span 1.53 m
+catcher debug      : False
+
+adjust site        : synagogue-01
+adjust rot         : 0.00 deg
+adjust scale       : 1.000x wide / 1.000x tall (aspect LOCKED)
+adjust E / N / up  : 0.00 / 0.00 / 0.00 m
+baked coordinates  : none
+unsaved changes    : False
+last save message  : cleared — project coords on next run
+adjustments file   : /storage/emulated/0/Android/data/com.pavel.arbuildings/files/adjustments.json
+
+model file         : synagogue.glb
+load state         : Loaded (17 renderers)
+renderers          : 17
+material shaders   : Shader Graphs/glTF-pbrSpecularGlossiness, Shader Graphs/glTF-pbrMetallicRoughness
+size mode          : FootprintWidth (axis Z, target 10 m)
+applied scale      : x1.8701
+recenter on anchor : True
+model height       : 15.91 m (alignment-root metres)
+world bounds@load  : 1.4 x 0.6 x 1.1 m
+cull bounds now    : centre (0.93, 0.30, 1.69), size 0.5 x 0.3 x 0.6 m, 0.03 m from where it is drawn
+
+sun computed az/el : 135.0 / 45.0 deg
+north offset       : 0.0 deg (GUESSED - shadows meaningless)
+forced daylight    : True
+sun light          : enabled=True intensity=1.40 colour=RGBA(1.000, 1.000, 1.000, 1.000)
+sun world forward  : (0.62, -0.79, -0.01)
+sun direction from : ROOM LIGHT (ARCore estimate)
+estimation mode    : AmbientSphericalHarmonics, MainLightDirection, MainLightIntensity
+estimated dir      : (0.62, -0.79, -0.01)
+estimated lumens   : 0
+estimated colour   : RGBA(0.002, 0.001, 0.000, 1.000)
+ambient lobes      : 2 (directionality 1.50x)
+exposure           : 0.00 EV (driven True)
+intensity divisor  : 1000
+
+depth occlusion    : ON
+depth manager      : enabled=True (the lever — a disabled manager clears the background keyword)
+depth requested    : Fastest, preference PreferEnvironmentOcclusion
+depth current      : Fastest, preference PreferEnvironmentOcclusion
+depth texture      : 160x90 — a depth image IS being produced, and the background pass writes it into the buffer
+depth at centre    : 0.00 m at centre | NO valid samples in 240 | 160x90 DepthUint16
+
+seg occlusion      : ON
+seg backend        : CPU (cpu)
+seg model          : modnet_256.tflite
+seg EP             : xnnpack
+seg ready          : True
+seg load           : CPU xnnpack 256x256 -> 256x256
+seg last error     : 
+seg interval       : 0.200 s
+seg inference      : 253.75 ms (fill+run+decode)
+seg fill           : 1.53 ms  p50 2.2 ms n=32
+seg run            : 251.37 ms  p50 251.4 ms n=32
+seg decode         : 0.85 ms  p50 0.8 ms n=32
+seg mask period    : 317 ms  p50 313.4 ms n=32
+seg input          : 256x256
+seg convert        : 256x256 native, no rescale
+seg camera image   : 640x480 -> centred square, no squash
+seg rotation       : 90 deg clockwise before inference
+seg mask texture   : 341x256 covering the frame, inset +42,+0
+seg labels         : 256x256 c=1
+seg output tensor  : FLOAT32 256x256x1 NCHW 262144 bytes, 4 per pixel
+seg output kind    : auto -> alpha (absolute) — VIEW ONLY, no occlusion. raw 0.0000 .. 0.7270
+seg normalisation  : (v-127.5)/127.5
+segmin             : 50 px
+seg max distance   : 12.0 m
+seg occluder shape : silhouette mask
+seg debug          : ON
+seg raw 0.0000 .. 0.7270 [auto -> alpha (absolute)]
+  painted 2.2% over 8 | median code 0
+seg thing/stuff    : 1458 / 0 px
+seg components     : 0 expanded 0
+seg mask           : 341x256
+
+quality: FIXED A  34.0 ms
+  shadows 8 m (TierA_RPAsset, 4 casc) - FIXED
+  auto OFF (FIXED)  quality level 0
+  pipeline TierA_RPAsset
+cpu                : 32% (proc/self)
+gpu                : 11% (gpu_busy)
+npu                : 0% (cpu)

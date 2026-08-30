@@ -1,0 +1,93 @@
+# state 2026-08-26 13:55:55
+build stamp        : 2026-08-26 13:46:43
+site id            : synagogue-01
+phase              : Placed
+readout            : preview: placed by hand, not by VPS | VPS: Tracking  32.085200, 34.813284 | ±4.9 m (need ≤5), yaw ±21°
+configured lat/lng : 32.0837890, 34.8145810
+altitude above ter : 0
+location service   : Running
+earth state        : Enabled
+earth tracking     : Tracking
+camera lat/lng     : 32.0851998, 34.8132844
+camera altitude    : 43.09 m
+camera heading     : 123.9 deg
+horiz accuracy     : 4.93 m (gate 5)
+yaw accuracy       : 21.5 deg (gate 15)
+can save coords    : heading too rough: ±21.5° (need ≤15°)
+preview active     : True
+preview            : PREVIEW: as seen from 120 m |   eye level 2.5 m away at 1:48
+last placement     : 
+anchor world pos   : (-0.01, 1.10, 2.52)
+anchor distance    : 2.5 m
+anchor trackable   : Tracking, active=True, pending=True
+shadow ground      : y at (-0.01, 1.10, 2.52), world span 1.88 m
+catcher debug      : False
+
+adjust site        : synagogue-01
+adjust rot         : 169.90 deg
+adjust scale       : 1.000x wide / 1.000x tall (aspect LOCKED)
+adjust E / N / up  : 0.00 / 0.00 / 0.00 m
+baked coordinates  : none
+unsaved changes    : False
+last save message  : 
+adjustments file   : /storage/emulated/0/Android/data/com.pavel.arbuildings/files/adjustments.json
+
+model file         : synagogue.glb
+load state         : Loaded (17 renderers)
+renderers          : 17
+material shaders   : Shader Graphs/glTF-pbrSpecularGlossiness, Shader Graphs/glTF-pbrMetallicRoughness
+size mode          : FootprintWidth (axis Z, target 10 m)
+applied scale      : x1.8701
+recenter on anchor : True
+model height       : 15.91 m (alignment-root metres)
+world bounds@load  : 0.6 x 0.3 x 0.7 m
+cull bounds now    : centre (-0.09, 1.26, 2.87), size 0.6 x 0.3 x 0.7 m, 0.02 m from where it is drawn
+
+sun computed az/el : 135.0 / 45.0 deg
+north offset       : -124.4 deg (MEASURED from VPS)
+forced daylight    : True
+sun light          : enabled=True intensity=1.40 colour=RGBA(1.000, 1.000, 1.000, 1.000)
+sun world forward  : (-0.24, -0.61, 0.75)
+sun direction from : ROOM LIGHT (ARCore estimate)
+estimation mode    : AmbientSphericalHarmonics, MainLightDirection, MainLightIntensity
+estimated dir      : (-0.24, -0.61, 0.75)
+estimated lumens   : 0
+estimated colour   : RGBA(0.565, 0.679, 0.659, 1.000)
+ambient lobes      : 2 (directionality 1.38x)
+exposure           : 0.00 EV (driven True)
+intensity divisor  : 1000
+
+depth occlusion    : ON
+depth manager      : enabled=True (the lever — a disabled manager clears the background keyword)
+depth requested    : Fastest, preference PreferEnvironmentOcclusion
+depth current      : Fastest, preference PreferEnvironmentOcclusion
+depth texture      : 160x90 — a depth image IS being produced, and the background pass writes it into the buffer
+depth at centre    : 0.56 m at centre | 0.34-0.94 m over 240/240 samples | 160x90 DepthUint16
+
+seg occlusion      : ON
+seg backend        : CPU (cpu)
+seg model          : deeplabv3_257_mv_gpu.tflite
+seg EP             : xnnpack
+seg ready          : True
+seg load           : CPU xnnpack 257x257 -> 257x257
+seg last error     : 
+seg inference      : 72.75 ms
+seg input          : 257x257
+seg labels         : 257x257 c=21
+seg normalisation  : (v-127.5)/127.5
+segmin             : 8 px
+seg max distance   : 12.0 m
+seg occluder shape : BOUNDING BOX
+seg debug          : ON
+seg classes: background=52662 person=13387
+seg thing/stuff    : 13387 / 52662 px
+seg components     : 7 expanded 6
+seg mask           : 257x257
+
+quality: AUTO C  86.5 ms / 36 drop / 28 recover
+  shadows 8 m (TierC_RPAsset, 1 casc) - from B, dropped 1x, recovered 0x, at floor
+  auto on  quality level 2
+  pipeline TierC_RPAsset
+cpu                : 20% (proc/self)
+gpu                : 3% (gpu_busy)
+npu                : 0% (cpu)

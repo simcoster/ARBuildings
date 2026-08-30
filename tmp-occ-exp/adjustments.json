@@ -1,0 +1,43 @@
+{
+    "entries": [
+        {
+            "siteId": "placeholder-01",
+            "headingDeg": 1.202117919921875,
+            "scale": 4.215729713439941,
+            "scaleVertical": 1.0,
+            "keepAspect": true,
+            "eastMetres": 0.0,
+            "northMetres": 0.0,
+            "heightMetres": 0.4452400207519531,
+            "hasCoordinates": true,
+            "latitude": 32.083767545654,
+            "longitude": 34.81517280889224
+        },
+        {
+            "siteId": "synagogue-01",
+            "headingDeg": 169.90200805664063,
+            "scale": 1.0,
+            "scaleVertical": 1.0,
+            "keepAspect": true,
+            "eastMetres": 0.0,
+            "northMetres": 0.0,
+            "heightMetres": 0.0,
+            "hasCoordinates": false,
+            "latitude": 0.0,
+            "longitude": 0.0
+        },
+        {
+            "siteId": "",
+            "headingDeg": 0.0,
+            "scale": 1.0,
+            "scaleVertical": 1.0,
+            "keepAspect": true,
+            "eastMetres": 0.0,
+            "northMetres": 0.0,
+            "heightMetres": 0.0,
+            "hasCoordinates": false,
+            "latitude": 0.0,
+            "longitude": 0.0
+        }
+    ]
+}

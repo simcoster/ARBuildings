@@ -1,0 +1,105 @@
+# state 2026-08-28 17:36:33
+build stamp        : 2026-08-27 00:52:38
+site id            : synagogue-01
+phase              : Placed
+readout            : preview: placed by hand, not by VPS | VPS: Tracking  32.085358, 34.813250 | ±4.5 m (need ≤5), yaw ±28°
+configured lat/lng : 32.0837890, 34.8145810
+altitude above ter : 0
+location service   : Running
+earth state        : Enabled
+earth tracking     : Tracking
+camera lat/lng     : 32.0853580, 34.8132496
+camera altitude    : 50.24 m
+camera heading     : 108.9 deg
+horiz accuracy     : 4.47 m (gate 5)
+yaw accuracy       : 27.7 deg (gate 15)
+can save coords    : heading too rough: ±27.7° (need ≤15°)
+preview active     : True
+preview            : PREVIEW: as seen from 120 m |   eye level 2.5 m away at 1:48
+last placement     : 
+anchor world pos   : (2.70, 1.19, -0.76)
+anchor distance    : 2.5 m
+anchor trackable   : Tracking, active=True, pending=True
+shadow ground      : y at (2.70, 1.13, -0.76), world span 1.88 m
+catcher debug      : False
+
+adjust site        : synagogue-01
+adjust rot         : 0.00 deg
+adjust scale       : 1.000x wide / 1.000x tall (aspect LOCKED)
+adjust E / N / up  : 0.00 / 0.00 / -2.99 m
+baked coordinates  : none
+unsaved changes    : True
+last save message  : 
+adjustments file   : /storage/emulated/0/Android/data/com.pavel.arbuildings/files/adjustments.json
+
+model file         : synagogue.glb
+load state         : Loaded (17 renderers)
+renderers          : 17
+material shaders   : Shader Graphs/glTF-pbrSpecularGlossiness, Shader Graphs/glTF-pbrMetallicRoughness
+size mode          : FootprintWidth (axis Z, target 10 m)
+applied scale      : x1.8701
+recenter on anchor : True
+model height       : 15.91 m (alignment-root metres)
+world bounds@load  : 0.7 x 0.3 x 0.6 m
+cull bounds now    : centre (2.35, 1.30, -0.70), size 0.7 x 0.3 x 0.6 m, 0.02 m from where it is drawn
+
+sun computed az/el : 135.0 / 45.0 deg
+north offset       : -16.2 deg (MEASURED from VPS)
+forced daylight    : True
+sun light          : enabled=True intensity=1.40 colour=RGBA(1.000, 1.000, 1.000, 1.000)
+sun world forward  : (0.80, -0.60, 0.01)
+sun direction from : ROOM LIGHT (ARCore estimate)
+estimation mode    : AmbientSphericalHarmonics, MainLightDirection, MainLightIntensity
+estimated dir      : (0.80, -0.60, 0.00)
+estimated lumens   : 0
+estimated colour   : RGBA(1.208, 1.374, 1.346, 1.000)
+ambient lobes      : 2 (directionality 1.43x)
+exposure           : 0.00 EV (driven True)
+intensity divisor  : 1000
+
+depth occlusion    : OFF
+depth manager      : enabled=False (the lever — a disabled manager clears the background keyword)
+depth requested    : Disabled, preference NoOcclusion
+depth current      : Disabled, preference NoOcclusion
+depth texture      : none
+depth at centre    : not sampled (occlusion off)
+
+seg occlusion      : ON
+seg backend        : CPU (cpu)
+seg model          : depth_anything_3_small_fp16.tflite
+seg EP             : xnnpack
+seg ready          : True
+seg load           : CPU xnnpack 504x896 (fell back, NPU/GPU refused: IllegalStateException: GpuDelegate not supported on this device)
+seg last error     : 
+seg interval       : 0.000 s
+seg inference      : 59.98 ms (fill+run+decode)
+seg fill           : 0.10 ms
+seg run            : 58.31 ms
+seg decode         : 1.56 ms
+seg mask period    : n/a
+seg input          : 504x896
+seg convert        : 480x480 then UPSCALED to 504x896 (camera cannot supply the tensor size)
+seg camera image   : 640x480 -> centred square, no squash
+seg rotation       : 90 deg clockwise before inference
+seg mask texture   : 672x896 covering the frame, inset +84,+0
+seg labels         : 504x896 c=1
+seg output tensor  : FLOAT32 504x896x1 NCHW 1806336 bytes, 4 per pixel
+seg output kind    : auto -> n/a — VIEW ONLY, no occlusion. raw 0.5446 .. 1.0835
+seg normalisation  : (v-123.7)/58.4
+segmin             : 50 px
+seg max distance   : 12.0 m
+seg occluder shape : silhouette mask
+seg debug          : ON
+seg raw 0.5446 .. 1.0835 [auto -> n/a]
+  painted 0.0% over 8 | median code 0 | view only
+seg thing/stuff    : 51 / 263118 px
+seg components     : 5 expanded 0
+seg mask           : 672x896
+
+quality: AUTO C  35.5 ms / 36 drop / 28 recover
+  shadows 8 m (TierC_RPAsset, 1 casc) - from A, dropped 2x, recovered 0x, at floor
+  auto on  quality level 2
+  pipeline TierC_RPAsset
+cpu                : 33% (proc/self)
+gpu                : 6% (gpu_busy)
+npu                : 0% (cpu)

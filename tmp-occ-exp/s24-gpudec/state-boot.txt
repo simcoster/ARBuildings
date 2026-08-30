@@ -1,0 +1,97 @@
+# state 2026-08-28 17:35:43
+build stamp        : 2026-08-27 00:52:38
+site id            : synagogue-01
+phase              : WaitingForAccuracy
+readout            : tracking: Tracking | lat/lng: 32.085359, 34.813247 | horizontal: 4.15 m (need <= 5) | yaw: 33.0° (need <= 15)
+configured lat/lng : 32.0837890, 34.8145810
+altitude above ter : 0
+location service   : Running
+earth state        : Enabled
+earth tracking     : Tracking
+camera lat/lng     : 32.0853588, 34.8132471
+camera altitude    : 49.47 m
+camera heading     : 11.8 deg
+horiz accuracy     : 4.15 m (gate 5)
+yaw accuracy       : 33.0 deg (gate 15)
+can save coords    : nothing placed yet
+preview active     : False
+
+adjust site        : 
+adjust rot         : 0.00 deg
+adjust scale       : 1.000x wide / 1.000x tall (aspect LOCKED)
+adjust E / N / up  : 0.00 / 0.00 / 0.00 m
+baked coordinates  : none
+unsaved changes    : False
+last save message  : 
+adjustments file   : /storage/emulated/0/Android/data/com.pavel.arbuildings/files/adjustments.json
+
+model file         : synagogue.glb
+load state         : Idle ()
+renderers          : 0
+material shaders   : unknown
+size mode          : FootprintWidth (axis Z, target 10 m)
+applied scale      : x1.0000
+recenter on anchor : True
+model height       : 0.00 m (alignment-root metres)
+world bounds@load  : 0.0 x 0.0 x 0.0 m
+cull bounds now    : no model
+
+sun computed az/el : 269.4 / 19.2 deg
+north offset       : 0.0 deg (GUESSED - shadows meaningless)
+forced daylight    : False
+sun light          : enabled=True intensity=2.00 colour=RGBA(1.154, 1.213, 1.164, 1.000)
+sun world forward  : (0.94, -0.33, 0.01)
+sun direction from : computed solar position
+estimation mode    : AmbientSphericalHarmonics, MainLightDirection, MainLightIntensity
+estimated dir      : (-0.07, -0.99, -0.09)
+estimated lumens   : 0
+estimated colour   : RGBA(1.154, 1.213, 1.164, 1.000)
+ambient lobes      : 2 (directionality 1.30x)
+exposure           : 0.00 EV (driven True)
+intensity divisor  : 1000
+
+depth occlusion    : OFF
+depth manager      : enabled=False (the lever — a disabled manager clears the background keyword)
+depth requested    : Disabled, preference NoOcclusion
+depth current      : Disabled, preference NoOcclusion
+depth texture      : none
+depth at centre    : not sampled (occlusion off)
+
+seg occlusion      : OFF
+seg backend        : CPU (cpu)
+seg model          : coral_deeplabv3_mnv2_pascal_quant.tflite
+seg EP             : xnnpack
+seg ready          : True
+seg load           : CPU xnnpack 513x513 -> 513x513
+seg last error     : 
+seg interval       : 0.200 s
+seg inference      : 60.35 ms (fill+run+decode)
+seg fill           : 0.06 ms  p50 0.1 ms n=32
+seg run            : 59.07 ms  p50 59.1 ms n=32
+seg decode         : 1.22 ms  p50 1.3 ms n=32
+seg mask period    : 235 ms  p50 232.8 ms n=32
+seg input          : 513x513
+seg convert        : 480x480 then UPSCALED to 513x513 (camera cannot supply the tensor size)
+seg camera image   : 640x480 -> centred square, no squash
+seg rotation       : 90 deg clockwise before inference
+seg mask texture   : 684x513 covering the frame, inset +85,+0
+seg labels         : 513x513 c=1
+seg output tensor  : INT64 513x513x1 NHWC 2105352 bytes, 8 per pixel
+seg output kind    : auto -> labels
+seg normalisation  : (v-127.5)/127.5
+segmin             : 50 px
+seg max distance   : 12.0 m
+seg occluder shape : silhouette mask
+seg debug          : OFF
+seg classes: background=175683 tv=87486
+seg thing/stuff    : 87486 / 175683 px
+seg components     : 12 expanded 5
+seg mask           : 684x513
+
+quality: AUTO A  33.3 ms / 36 drop / 28 recover
+  shadows 150 m (TierA_RPAsset, 4 casc) - start A (auto)
+  auto on  quality level 0
+  pipeline TierA_RPAsset
+cpu                : 12% (proc/self)
+gpu                : 12% (gpu_busy)
+npu                : 0% (seg off)

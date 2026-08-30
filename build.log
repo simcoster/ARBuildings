@@ -1,0 +1,26 @@
+[Licensing::Module] Trying to connect to existing licensing client channel...
+Built from '6000.5/staging' branch; Version is '6000.5.7f1 (017862109af0) revision 96354'; Using compiler version '194234433'; Build Type 'Release'
+OS: 'Windows 11  (10.0.26200) Professional' Language: 'en' Physical Memory: 32611 MB
+[Licensing::IpcConnector] Successfully connected to: "LicenseClient-simco" at "2026-08-26T19:10:34.932164Z"
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1
+System  architecture: x64
+Process architecture: x64
+Date: 2026-08-26T19:10:34Z
+
+COMMAND LINE ARGUMENTS:
+C:\Program Files\Unity\Hub\Editor\6000.5.7f1\Editor\Unity.exe
+-quit
+-batchmode
+-projectPath
+C:/Users/simco/AR_Buildings
+-buildTarget
+Android
+-executeMethod
+BuildAndroid.Build
+-outputPath
+C:/Users/simco/AR_Buildings/Builds/ARBuildings.apk
+-logFile
+C:/Users/simco/AR_Buildings/build.log
+Successfully changed project path to: C:/Users/simco/AR_Buildings
+C:/Users/simco/AR_Buildings
+Exiting without the bug reporter. Application will terminate with return code 1

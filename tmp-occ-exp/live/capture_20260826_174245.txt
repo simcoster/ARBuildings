@@ -1,0 +1,121 @@
+AR_Buildings capture 20260826_174245
+============================================================
+
+--- DEVICE --------------------------------------------------
+model              : samsung SM-A356E
+os                 : Android OS 16 / API-36 (BP4A.251205.006/A356EXXSADZG2)
+graphics           : Mali-G68 (OpenGLES3)
+memory             : 5425 MB, 8 cores
+screen             : 1080x2340
+quality level      : 2 (Tier C)
+target frame rate  : 30
+unity              : 6000.5.7f1
+
+--- QUALITY -------------------------------------------------
+quality: AUTO C  38.6 ms / 36 drop / 28 recover
+  shadows 60 m (TierC_RPAsset, 1 casc) - from B, dropped 1x, recovered 0x, at floor
+  auto on  quality level 2
+  pipeline TierC_RPAsset
+
+--- PERF ----------------------------------------------------
+cpu                : 30% (proc/self)
+gpu                : 41% (gpu_busy)
+npu                : 0% (cpu)
+
+--- PLACEMENT -----------------------------------------------
+build stamp        : 2026-08-26 17:29:27
+site id            : synagogue-01
+phase              : WaitingForEarth
+readout            : EarthState: Enabled | tracking: None | location: DISABLED on device — turn Location on | Point at building facades and walk sideways
+configured lat/lng : 32.0837890, 34.8145810
+altitude above ter : 0
+location service   : DISABLED on device — turn Location on
+earth state        : Enabled
+earth tracking     : None
+can save coords    : nothing placed yet
+preview active     : False
+
+--- HEADING / FOOTPRINT -------------------------------------
+heading 9.6° (from A→B)
+facade 16.7 m
+model front offset : 0 deg
+footprint mode     : True
+footprint length   : 16.72 m
+effective heading  : 9.57 deg
+
+--- MODEL ---------------------------------------------------
+model file         : synagogue.glb
+load state         : Idle ()
+renderers          : 0
+material shaders   : unknown
+size mode          : FootprintWidth (axis Z, target 10 m)
+applied scale      : x1.0000
+recenter on anchor : True
+model height       : 0.00 m (alignment-root metres)
+world bounds@load  : 0.0 x 0.0 x 0.0 m
+cull bounds now    : no model
+
+--- ADJUSTMENT ----------------------------------------------
+adjust site        : 
+adjust rot         : 0.00 deg
+adjust scale       : 1.000x wide / 1.000x tall (aspect LOCKED)
+adjust E / N / up  : 0.00 / 0.00 / 0.00 m
+baked coordinates  : none
+unsaved changes    : False
+last save message  : 
+adjustments file   : /storage/emulated/0/Android/data/com.pavel.arbuildings/files/adjustments.json
+
+--- OCCLUSION -----------------------------------------------
+depth occlusion    : ON
+depth manager      : enabled=True (the lever — a disabled manager clears the background keyword)
+depth requested    : Fastest, preference PreferEnvironmentOcclusion
+depth current      : Fastest, preference PreferEnvironmentOcclusion
+depth texture      : 160x90 — a depth image IS being produced, and the background pass writes it into the buffer
+depth at centre    : no CPU depth image available
+
+--- SEMANTIC ------------------------------------------------
+seg occlusion      : ON
+seg backend        : CPU (cpu)
+seg model          : deeplabv3_257_mv_gpu.tflite
+seg EP             : xnnpack
+seg ready          : True
+seg load           : CPU xnnpack 257x257 -> 257x257
+seg last error     : 
+seg inference      : 90.52 ms
+seg input          : 257x257
+seg convert        : 257x257 native, no rescale
+seg camera image   : 640x480 -> centred square, no squash
+seg rotation       : 90 deg clockwise before inference
+seg mask texture   : 343x257 covering the frame, inset +43,+0
+seg labels         : 257x257 c=21
+seg output tensor  : FLOAT32 257x257x21 5548116 bytes, 84 per pixel
+seg normalisation  : (v-127.5)/127.5
+segmin             : 50 px
+seg max distance   : 12.0 m
+seg occluder shape : silhouette mask
+seg debug          : ON
+seg classes: background=65975 sofa=74
+seg thing/stuff    : 74 / 65975 px
+seg components     : 1 expanded 0
+seg mask           : 343x257
+
+--- LIGHTING ------------------------------------------------
+sun computed az/el : 270.9 / 18.2 deg
+north offset       : 0.0 deg (GUESSED - shadows meaningless)
+forced daylight    : False
+sun light          : enabled=True intensity=2.00 colour=RGBA(0.043, 0.057, 0.042, 1.000)
+sun world forward  : (0.95, -0.31, -0.01)
+sun direction from : computed solar position
+estimation mode    : AmbientSphericalHarmonics, MainLightDirection, MainLightIntensity
+estimated dir      : (-0.61, -0.77, -0.16)
+estimated lumens   : 0
+estimated colour   : RGBA(0.043, 0.057, 0.042, 1.000)
+ambient lobes      : 2 (directionality 1.27x)
+exposure           : 0.00 EV (driven True)
+intensity divisor  : 1000
+
+--- CAMERA --------------------------------------------------
+position           : (0.13, 0.12, -0.22)
+euler              : (22.25, 102.36, 358.69)
+fov / near / far   : 68.2 / 0.1 / 1000
+

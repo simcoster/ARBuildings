@@ -1,0 +1,4 @@
+seg off
+segmax 1.6
+state
+

@@ -1,0 +1,128 @@
+AR_Buildings capture 20260826_222304
+============================================================
+
+--- DEVICE --------------------------------------------------
+model              : samsung SM-A356E
+os                 : Android OS 16 / API-36 (BP4A.251205.006/A356EXXSADZG2)
+graphics           : Mali-G68 (OpenGLES3)
+memory             : 5425 MB, 8 cores
+screen             : 1080x2340
+quality level      : 2 (Tier C)
+target frame rate  : 30
+unity              : 6000.5.7f1
+
+--- QUALITY -------------------------------------------------
+quality: AUTO C  175.5 ms / 36 drop / 28 recover
+  shadows 60 m (TierC_RPAsset, 1 casc) - from B, dropped 1x, recovered 0x, at floor
+  auto on  quality level 2
+  pipeline TierC_RPAsset
+
+--- PERF ----------------------------------------------------
+cpu                : 22% (proc/self)
+gpu                : 98% (gpu_busy)
+npu                : 0% (gpudec)
+
+--- PLACEMENT -----------------------------------------------
+build stamp        : 2026-08-26 22:17:34
+site id            : synagogue-01
+phase              : WaitingForEarth
+readout            : EarthState: Enabled | tracking: None | location: DISABLED on device — turn Location on | Point at building facades and walk sideways
+configured lat/lng : 32.0837890, 34.8145810
+altitude above ter : 0
+location service   : DISABLED on device — turn Location on
+earth state        : Enabled
+earth tracking     : None
+can save coords    : nothing placed yet
+preview active     : False
+
+--- HEADING / FOOTPRINT -------------------------------------
+heading 9.6° (from A→B)
+facade 16.7 m
+model front offset : 0 deg
+footprint mode     : True
+footprint length   : 16.72 m
+effective heading  : 9.57 deg
+
+--- MODEL ---------------------------------------------------
+model file         : synagogue.glb
+load state         : Idle ()
+renderers          : 0
+material shaders   : unknown
+size mode          : FootprintWidth (axis Z, target 10 m)
+applied scale      : x1.0000
+recenter on anchor : True
+model height       : 0.00 m (alignment-root metres)
+world bounds@load  : 0.0 x 0.0 x 0.0 m
+cull bounds now    : no model
+
+--- ADJUSTMENT ----------------------------------------------
+adjust site        : 
+adjust rot         : 0.00 deg
+adjust scale       : 1.000x wide / 1.000x tall (aspect LOCKED)
+adjust E / N / up  : 0.00 / 0.00 / 0.00 m
+baked coordinates  : none
+unsaved changes    : False
+last save message  : 
+adjustments file   : /storage/emulated/0/Android/data/com.pavel.arbuildings/files/adjustments.json
+
+--- OCCLUSION -----------------------------------------------
+depth occlusion    : ON
+depth manager      : enabled=True (the lever — a disabled manager clears the background keyword)
+depth requested    : Fastest, preference PreferEnvironmentOcclusion
+depth current      : Fastest, preference PreferEnvironmentOcclusion
+depth texture      : 160x90 — a depth image IS being produced, and the background pass writes it into the buffer
+depth at centre    : 0.67 m at centre | 0.54-1.66 m over 240/240 samples | 160x90 DepthUint16
+
+--- SEMANTIC ------------------------------------------------
+seg occlusion      : ON
+seg backend        : GPUDEC (gpudec)
+seg model          : modnet_512.tflite
+seg EP             : gpu-delegate
+seg ready          : True
+seg load           : GPUDEC gpu-delegate 512x512 -> 512x512
+seg last error     : 
+seg interval       : 0.000 s
+seg inference      : 558.19 ms (fill+run+decode)
+seg fill           : 8.04 ms  p50 8.2 ms n=32
+seg run            : 544.58 ms  p50 544.5 ms n=32
+seg decode         : 5.57 ms  p50 7.6 ms n=32
+seg mask period    : 670 ms  p50 662.0 ms n=32
+seg input          : 512x512
+seg convert        : 480x480 then UPSCALED to 512x512 (camera cannot supply the tensor size)
+seg camera image   : 640x480 -> centred square, no squash
+seg rotation       : 90 deg clockwise before inference
+seg mask texture   : 683x512 covering the frame, inset +85,+0
+seg labels         : 512x512 c=1
+seg output tensor  : FLOAT32 512x512x1 NCHW 1048576 bytes, 4 per pixel
+seg output kind    : auto -> alpha (absolute) — VIEW ONLY, no occlusion. raw 0.0000 .. 1.0000
+seg normalisation  : (v-127.5)/127.5
+segmin             : 50 px
+seg max distance   : 12.0 m
+seg occluder shape : silhouette mask
+seg debug          : ON
+seg raw 0.0000 .. 1.0000 [auto -> alpha (absolute)]
+  painted 4.1% over 8 | median code 0
+seg thing/stuff    : 10845 / 0 px
+seg components     : 0 expanded 0
+seg mask           : 683x512
+
+--- LIGHTING ------------------------------------------------
+sun computed az/el : 315.7 / -36.1 deg
+north offset       : 0.0 deg (GUESSED - shadows meaningless)
+forced daylight    : False
+sun light          : enabled=False intensity=2.00 colour=RGBA(0.670, 0.686, 0.587, 1.000)
+sun world forward  : (-0.32, -0.77, 0.56)
+sun direction from : computed solar position
+estimation mode    : AmbientSphericalHarmonics, MainLightDirection, MainLightIntensity
+estimated dir      : (-0.04, -0.85, 0.52)
+estimated lumens   : 0
+estimated colour   : RGBA(0.670, 0.686, 0.587, 1.000)
+ambient lobes      : 2 (directionality 1.31x)
+exposure           : 0.00 EV (driven True)
+intensity divisor  : 1000
+
+--- CAMERA --------------------------------------------------
+position           : (0.01, 1.11, 0.01)
+euler              : (13.60, 359.88, 351.55)
+fov / near / far   : 68.1 / 0.1 / 1000
+
