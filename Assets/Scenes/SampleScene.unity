@@ -189,7 +189,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Unity.XR.ARFoundation::UnityEngine.XR.ARFoundation.AROcclusionManager
   m_HumanSegmentationStencilMode: 0
   m_HumanSegmentationDepthMode: 0
-  m_EnvironmentDepthMode: 1
+  m_EnvironmentDepthMode: 3
   m_EnvironmentDepthTemporalSmoothing: 1
   m_OcclusionPreferenceMode: 0
 --- !u!114 &379862619
@@ -261,6 +261,8 @@ MonoBehaviour:
   forcedSunElevation: 45
   forcedSunAzimuth: 135
   forcedSunIntensity: 1.4
+  matchEstimatedLight: 1
+  estimatedLightSmoothing: 3
   earthManager: {fileID: 0}
   fallbackNorthOffsetDeg: 0
   driveExposure: 1
@@ -284,17 +286,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5e88a734b33f01f449e8c03366f79b11, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  streetscapeManager: {fileID: 379862630}
-  occluderMaterial: {fileID: 2100000, guid: 2a6f8c14d3b07e4f8c15a9e2b7d06c53, type: 2}
-  ghostMaterial: {fileID: 2100000, guid: 9d3a7e26c8f14b40b2e7d509a4c16f8b, type: 2}
-  ghostTargetBuilding: 1
-  targetAnchor: {fileID: 0}
-  visualiseMeshes: 0
-  debugMaterial: {fileID: 2100000, guid: 7c3a9e51d284b64f8a0f2b7e35c19d06, type: 2}
-  cutoutEnabled: 1
-  occludersEnabled: 0
-  cutoutMargin: 1.08
-  cutoutPaddingMetres: 1.5
 --- !u!114 &379862633
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -310,6 +301,10 @@ MonoBehaviour:
   startTier: -1
   targetFrameRate: 30
   warmupSeconds: 10
+  dropBudgetMs: 36
+  recoverBudgetMs: 28
+  recoverWindows: 3
+  holdAfterDropSeconds: 30
 --- !u!1 &410087039
 GameObject:
   m_ObjectHideFlags: 0
@@ -974,7 +969,6 @@ MonoBehaviour:
   placement: {fileID: 1200000004}
   nudge: {fileID: 1200000005}
   buildingLoader: {fileID: 1200000006}
-  streetscapeShadows: {fileID: 379862632}
   siteId: synagogue-01
   latitude: 32.083789
   longitude: 34.814581
@@ -990,6 +984,7 @@ MonoBehaviour:
   previewCamera: {fileID: 0}
   shadowCatcherMaterial: {fileID: 0}
   shadowGroundScale: 3
+  previewShadowDistanceMetres: 8
   previewFitFraction: 0.5
   maxPlacementDistance: 8
   logStatus: 1
@@ -1068,8 +1063,9 @@ MonoBehaviour:
   nudge: {fileID: 1200000005}
   lighting: {fileID: 379862631}
   loader: {fileID: 0}
-  streetscape: {fileID: 0}
   quality: {fileID: 0}
+  depth: {fileID: 0}
+  seg: {fileID: 0}
 --- !u!114 &1200000008
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1089,7 +1085,9 @@ MonoBehaviour:
   nudge: {fileID: 0}
   lighting: {fileID: 0}
   loader: {fileID: 0}
-  streetscape: {fileID: 0}
+  depth: {fileID: 0}
+  seg: {fileID: 0}
+  quality: {fileID: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

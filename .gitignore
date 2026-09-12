@@ -46,6 +46,7 @@ crashlytics-build.properties
 .vs/
 .vscode/
 .idea/
+omnisharp.json
 *.DotSettings.user
 
 # Secrets — contains Google Cloud API keys. Copy the .template and fill in your own.
@@ -66,6 +67,18 @@ Thumbs.db
 /ModelSource/
 /tools/encoder_bench/android
 
+# Local SAM / PyTorch checkpoints (large; downloaded on this machine)
+/TrainingOcclusionModel/frames/
+/TrainingOcclusionModel/masks/
+/TrainingOcclusionModel/masks_experiments/
+/TrainingOcclusionModel/models/
+/TrainingOcclusionModel/videos/
+/TrainingOcclusionModel/batch_work/
+/TrainingOcclusionModel/exports/
+/TrainingOcclusionModel/__pycache__/
+FineTuneSingleObject/
+
+
 # Generated per build by BuildStampProcessor — changes on every build, never worth a diff
 /Assets/Resources/BuildStamp.txt
 /Assets/Resources/BuildStamp.txt.meta
@@ -82,3 +95,4 @@ Thumbs.db
 # AR Foundation XR Simulation scratch copies
 /Assets/XR/Temp/
 /Assets/XR/Temp.meta
+TrainingOcclusionModel/run_sam.py

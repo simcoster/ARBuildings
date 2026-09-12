@@ -9,7 +9,7 @@ using UnityEngine.XR.ARSubsystems;
 ///
 /// <para>
 /// The scene carries an <see cref="AROcclusionManager"/> with environment depth set to
-/// <c>Fastest</c> and temporal smoothing on. Nothing in this project ever asked for it and no
+/// <c>Best</c> and temporal smoothing on. Nothing in this project ever asked for it and no
 /// custom shader samples it, which is exactly why it went unnoticed: it does not need one.
 /// <c>ARCoreBackground.shader</c> draws the camera feed with <c>ZWrite On</c> and writes
 /// <c>gl_FragDepth</c> straight from <c>_EnvironmentDepth</c>, so ARCore's depth map lands in
@@ -64,9 +64,8 @@ public class DepthOcclusion : MonoBehaviour
              "front of the building should hide it.")]
     [SerializeField] bool enableOnStart = true;
 
-    [Tooltip("Depth mode requested when this is switched on. Fastest is the right trade for " +
-             "occlusion — the extra quality only sharpens edges.")]
-    [SerializeField] EnvironmentDepthMode modeWhenOn = EnvironmentDepthMode.Fastest;
+    [Tooltip("Depth mode requested when this is switched on.")]
+    [SerializeField] EnvironmentDepthMode modeWhenOn = EnvironmentDepthMode.Best;
 
     [Tooltip("How often to check that the subsystem still agrees with the request. The " +
              "manager only forwards a request once its subsystem exists, and the subsystem " +
