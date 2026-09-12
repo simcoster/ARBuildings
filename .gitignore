@@ -95,4 +95,3 @@ FineTuneSingleObject/
 # AR Foundation XR Simulation scratch copies
 /Assets/XR/Temp/
 /Assets/XR/Temp.meta
-TrainingOcclusionModel/run_sam.py
