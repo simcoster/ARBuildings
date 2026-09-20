@@ -29,7 +29,9 @@ using UnityEngine;
 ///     seg on|off      semantic occlusion. PASCAL things expand ARCore depth; alpha
 ///                     mattes (MODNet) occlude from the silhouette even without a depth hit.
 ///     seg cpu|gpu|npu|gpudec  interpreter: XNNPACK / NNAPI-hybrid / ENN / Mali GpuDelegate
-///     segint N        seconds between submits (0 = as soon as the worker is free)
+///     segint N        minimum seconds between submits (0 = only the frame skip)
+///     segn N          infer every Nth camera frame (default 15). `segn 1` is every frame
+///     segtimer N      keep the model loaded this many seconds, then unload. 0 / off = stay
 ///     segmin N        pixels of ARCore-depth overlap before a segment is expanded
 ///     segdebug on|off tint accepted segments
 ///     segmax N        max occlusion distance in metres (0 = no cap)
@@ -267,6 +269,27 @@ public class RemoteControl : MonoBehaviour
                     return $"ERROR '{arg}' is not a number";
                 return seg.SetInferInterval(segInt);
 
+            case "segn":
+            case "segframe":
+                if (seg == null) return "no semantic occlusion";
+                if (arg.Length == 0) return $"segn every {seg.InferEveryNFrames} frame(s)";
+                if (!int.TryParse(arg, NumberStyles.Integer, CultureInfo.InvariantCulture, out int everyN))
+                    return $"ERROR '{arg}' is not an int";
+                return seg.SetInferEveryNFrames(everyN);
+
+            case "segtimer":
+            case "seghold":
+                if (seg == null) return "no semantic occlusion";
+                if (arg.Length == 0)
+                    return seg.HoldSeconds <= 0f
+                        ? "segtimer off"
+                        : $"segtimer {seg.HoldSeconds:F0}s ({(seg.HoldLeft >= 0f ? $"{seg.HoldLeft:F0}s left" : "not running")})";
+                if (arg.Equals("off", StringComparison.OrdinalIgnoreCase))
+                    return seg.SetHoldSeconds(0f);
+                if (!float.TryParse(arg, NumberStyles.Float, CultureInfo.InvariantCulture, out float hold))
+                    return $"ERROR '{arg}' is not a number";
+                return seg.SetHoldSeconds(hold);
+
             case "segmin":
                 if (seg == null) return "no semantic occlusion";
                 if (arg.Length == 0) return $"segmin {seg.MinVotePixels}";
@@ -295,6 +318,25 @@ public class RemoteControl : MonoBehaviour
                 if (seg == null) return "no semantic occlusion";
                 seg.CentreCrop = OnOff(arg);
                 return $"segcrop {(seg.CentreCrop ? "on — centred square, no squash" : "off — whole frame squashed")}";
+
+            case "segcam":
+                if (seg == null) return "no semantic occlusion";
+                if (arg.Length == 0)
+                    return seg.GpuCameraInput
+                        ? "segcam gpu — blit ARCore camera texture, async readback"
+                        : "segcam cpu — XRCpuImage";
+                {
+                    string cam = arg.ToLowerInvariant();
+                    if (cam == "gpu" || cam == "on") return seg.SetGpuCameraInput(true);
+                    if (cam == "cpu" || cam == "off") return seg.SetGpuCameraInput(false);
+                    return "ERROR segcam gpu|cpu";
+                }
+
+            case "segflip":
+                if (seg == null) return "no semantic occlusion";
+                if (arg.Length == 0) return $"segflip {(seg.GpuBlitFlipY ? "on" : "off")}";
+                seg.GpuBlitFlipY = OnOff(arg);
+                return $"segflip {(seg.GpuBlitFlipY ? "on" : "off")} (Y of GPU blit)";
 
             case "segdump":
                 if (seg == null) return "no semantic occlusion";

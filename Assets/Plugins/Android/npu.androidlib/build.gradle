@@ -1,11 +1,39 @@
 apply plugin: 'com.android.library'
 
+// LiteRT 2.1 AAR is Java 21 bytecode (class file 65). Unity's Android JDK is 17 and
+// javac 17 cannot even read those classes. Fork THIS module's javac onto a JDK 21
+// install; leave Unity External Tools on the bundled 17.0.18.8 — it will refuse 21.
+def jdk21Home = {
+    def env = System.getenv('JDK21_HOME')
+    if (env) {
+        def f = file(env)
+        if (f.exists()) return f
+    }
+    def microsoft = file('C:/Program Files/Microsoft')
+    if (microsoft.exists()) {
+        def hits = microsoft.listFiles()?.findAll { it.name.startsWith('jdk-21') }?.toList()
+        if (hits) return hits.sort { it.name }.last()
+    }
+    return null
+}()
+if (jdk21Home == null) {
+    throw new GradleException(
+        'LiteRT 2.1 needs JDK 21 to compile NpuSegmenter. Install Microsoft OpenJDK 21 ' +
+        '(winget install Microsoft.OpenJDK.21) or set JDK21_HOME. Do not point Unity ' +
+        'External Tools at it — that knob must stay on the bundled JDK 17.')
+}
+logger.lifecycle("[npu] JavaCompile forked onto ${jdk21Home}")
+tasks.withType(JavaCompile).configureEach {
+    options.fork = true
+    options.forkOptions.javaHome = jdk21Home
+}
+
 dependencies {
     implementation fileTree(dir: 'bin', include: ['*.jar'])
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation 'org.tensorflow:tensorflow-lite:2.16.1'
-    implementation 'org.tensorflow:tensorflow-lite-gpu:2.16.1'
-    implementation 'org.tensorflow:tensorflow-lite-gpu-api:2.16.1'
+    // LiteRT 2.1 ships org.tensorflow.lite.* itself (CPU Interpreter + CompiledModel).
+    // tensorflow-lite:2.16.1 cannot sit next to it — duplicate DataType/Interpreter classes.
+    implementation 'com.google.ai.edge.litert:litert:2.1.0'
 }
 
 android {

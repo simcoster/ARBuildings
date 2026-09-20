@@ -62,7 +62,7 @@ public class DepthOcclusion : MonoBehaviour
     [Tooltip("Whether real-world depth is allowed to hide the model. This is now the ONLY " +
              "occluder in the app, so ON is the intended state — a car or a pedestrian in " +
              "front of the building should hide it.")]
-    [SerializeField] bool enableOnStart = true;
+    [SerializeField] bool enableOnStart = false;
 
     [Tooltip("Depth mode requested when this is switched on.")]
     [SerializeField] EnvironmentDepthMode modeWhenOn = EnvironmentDepthMode.Best;
@@ -115,6 +115,9 @@ public class DepthOcclusion : MonoBehaviour
     void Awake()
     {
         if (_manager == null) _manager = FindAnyObjectByType<AROcclusionManager>();
+        // Scene-serialized true would turn depth on before the first frame. Off at boot
+        // is the only state that cannot hang the phone on a black camera.
+        enableOnStart = false;
     }
 
     void Start() => Apply();

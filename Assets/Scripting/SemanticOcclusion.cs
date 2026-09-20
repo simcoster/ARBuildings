@@ -3,9 +3,11 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
 using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Networking;
+using UnityEngine.Rendering;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
 
@@ -24,38 +26,40 @@ using UnityEngine.XR.ARSubsystems;
 /// </summary>
 public class SemanticOcclusion : MonoBehaviour
 {
-    public const string DefaultModelFile = "coral_deeplabv3_mnv2_pascal_quant.tflite";
+    public const string DefaultModelFile = "dis_isnet_1024.tflite";
     public const string CannyModel = "canny";
+    public const string BenchModel = "bench";
 
     public enum SegBackend
     {
         Cpu,     // XNNPACK
         Gpu,     // NNAPI hybrid (GPU/CPU) — this is NOT the Mali GpuDelegate
-        GpuDec,  // tensorflow-lite-gpu GpuDelegate on Mali
+        GpuDec,  // LiteRT CompiledModel GPU for DIS; classic GpuDelegate otherwise
         Npu      // ENN, CPU disabled
     }
 
     [SerializeField] bool enableOnStart;
     [SerializeField] string modelFile = DefaultModelFile;
 
-    [Tooltip("Cycled by the HUD's model button, in this order. Anything pushed to the " +
-             "device as a .tflite joins the cycle too, without a rebuild. `canny` is CPU " +
-             "edges, not a file.")]
-    // Only the one that actually found the bottle survives in the APK. The four DeepLab /
-    // MediaPipe also-rans were dropped on 2026-08-26. Everything being compared now is a
-    // matting or depth model an order of magnitude too big to ship, so it arrives by push
-    // and Catalogue() picks it up. `canny` is built in (no .tflite).
+    [Tooltip("Cycled by the HUD's model button. DIS-ISNet is the only entry; it lives on " +
+             "the device (176 MB), not in the APK. `segmodel FILE` still loads anything.")]
     [SerializeField] string[] modelFiles =
     {
-        "coral_deeplabv3_mnv2_pascal_quant.tflite",  // 513 uint8 PASCAL — the one that found the bottle
-        CannyModel,
+        DefaultModelFile,
     };
 
-    [SerializeField] SegBackend backend = SegBackend.Cpu;
+    [SerializeField] SegBackend backend = SegBackend.GpuDec;
     [SerializeField] int minVotePixels = 50;
     [SerializeField] float maxOcclusionDistance = 12f;
     [SerializeField] bool debugTint;
-    [SerializeField] float inferIntervalSeconds = 0.2f;
+    [SerializeField] float inferIntervalSeconds = 0f;
+
+    [Tooltip("Only queue inference every N camera frames. 1 = as soon as the worker is free.")]
+    [SerializeField] int inferEveryNFrames = 1;
+
+    [Tooltip("After a successful load, keep the interpreter this many seconds and then " +
+             "unload. 0 (default) stays loaded until you tap seg off.")]
+    [SerializeField] float holdSeconds = 0f;
 
     [Tooltip("Occlude the whole axis-aligned box of an accepted object instead of its " +
              "silhouette. A 257x257 mask upsampled to the screen leaves ragged holes in " +
@@ -79,6 +83,16 @@ public class SemanticOcclusion : MonoBehaviour
              "whole frame into one. Squashing compresses one axis by the frame aspect, which " +
              "costs wide objects — cars, buses — far more than tall ones.")]
     [SerializeField] bool centreCrop = true;
+
+    [Tooltip("Blit ARCore's GPU camera texture (1080p-class) into the model input instead of " +
+             "XRCpuImage (640x480 on this phone). LiteRT Java cannot bind a GL texture, so " +
+             "this is still a readback — but the photons are the preview feed, not an " +
+             "upscaled 480 crop. `segcam cpu` is the escape hatch.")]
+    [SerializeField] bool gpuCameraInput = true;
+
+    [Tooltip("RenderTextures are bottom-up; XRCpuImage is top-down. Flip the blit so a GPU " +
+             "frame matches the orientation the CPU path used to feed the network.")]
+    [SerializeField] bool gpuBlitFlipY = true;
 
     [Tooltip("XNNPACK on the CPU backend. Off falls back to TFLite's built-in kernels, " +
              "which accept graphs XNNPACK refuses to load at all.")]
@@ -120,17 +134,32 @@ public class SemanticOcclusion : MonoBehaviour
     byte[] _modelBytes;
     string _deviceModelPath;
     bool _reloading;
+    bool _unloadAfterBind;
+    bool _holdUnloaded;
+    float _holdLeft = -1f;
     bool _normOverridden;
     int _depthW, _depthH;
     bool[] _isThing = BuildPascalThing();
     string[] _classNames = PascalNames;
 
     int _camW, _camH;
-    // The mask texture covers the WHOLE camera frame in UV, so the shader can keep sampling
-    // it with the same coordinates as the camera texture. The square inference result lands
-    // inside it at a 1:1 pixel offset, which is why the mask is frame-shaped and not square.
+    // The mask texture covers the WHOLE GPU camera frame in UV, so the shader can keep
+    // sampling it with the same coordinates as the camera texture. The CPU image is often
+    // a different aspect (640x480 4:3 vs a 16:9 GPU feed); the square inference result is
+    // inset into the GPU-sized canvas, not the CPU one, or the overlay looks squeezed.
     int _maskW, _maskH, _offX, _offY;
+    int _gpuW, _gpuH;
+    Texture _gpuCamTex;
+    RenderTexture _inferRT;
+    RenderTexture _camCopyRT;
+    AsyncGPUReadbackRequest _gpuReadback;
+    bool _gpuReadbackPending;
+    bool _wantGpuCapture;
+    bool _gpuInputFailed;
+    bool _gpuDisplaySpace;
+    string _convertNote = "n/a";
     float _inferTimer;
+    int _frameSkip;
     float _maskPeriodMs = -1f;
     float _lastMaskAt = -1f;
     const int StageHistCap = 32;
@@ -138,6 +167,18 @@ public class SemanticOcclusion : MonoBehaviour
     readonly float[] _runHist = new float[StageHistCap];
     readonly float[] _decodeHist = new float[StageHistCap];
     readonly float[] _periodHist = new float[StageHistCap];
+    const int StageN = 15;
+    const int SWaitCam = 0, SBlit = 1, SCopy = 2, SUnpack = 3, SConvert = 4,
+        SResize = 5, SRotate = 6, SSubmit = 7, SFill = 8, SRun = 9, SDecode = 10,
+        SInferWait = 11, SPaint = 12, SUpload = 13, SE2E = 14;
+    static readonly string[] StageName =
+    {
+        "wait-cam", "blit", "copy", "unpack", "convert", "resize", "rotate",
+        "submit", "fill", "run", "decode", "infer-wait", "paint", "upload", "e2e"
+    };
+    readonly float[] _stageLast = new float[StageN];
+    readonly float[] _stageHist = new float[StageN * StageHistCap];
+    float _tWant = -1f, _tFrame = -1f, _tCopyStart = -1f, _tSubmit = -1f;
     int _stageCount;
     int _stageI;
     string _loadNote = "not loaded";
@@ -160,7 +201,21 @@ public class SemanticOcclusion : MonoBehaviour
             enableOnStart = value;
             debugTint = value;
             ApplyMaterialFlags();
-            if (value && _npu.Ready) SubmitFrame();
+            if (!value)
+            {
+                _holdLeft = -1f;
+                if (_reloading) _unloadAfterBind = true;
+                else StartCoroutine(UnloadModel());
+                return;
+            }
+            _unloadAfterBind = false;
+            _holdUnloaded = false;
+            if (_npu.Ready)
+            {
+                ArmHoldTimer();
+                SubmitFrame();
+            }
+            else if (!_reloading) StartCoroutine(LoadModel());
         }
     }
 
@@ -212,6 +267,25 @@ public class SemanticOcclusion : MonoBehaviour
         }
     }
 
+    public bool GpuCameraInput => gpuCameraInput && !_gpuInputFailed;
+
+    public string SetGpuCameraInput(bool on)
+    {
+        gpuCameraInput = on;
+        _gpuInputFailed = false;
+        _wantGpuCapture = false;
+        _maskW = _maskH = 0;
+        return gpuCameraInput
+            ? "segcam gpu — blit ARCore camera texture, async readback"
+            : "segcam cpu — XRCpuImage";
+    }
+
+    public bool GpuBlitFlipY
+    {
+        get => gpuBlitFlipY;
+        set => gpuBlitFlipY = value;
+    }
+
     public string SetNormalization(float mean, float scale)
     {
         inputMean = mean;
@@ -250,9 +324,21 @@ public class SemanticOcclusion : MonoBehaviour
                 inputScale = 1f;
                 outputKind = "alpha";
             }
+            else if (f == BenchModel)
+            {
+                inputMean = 0f;
+                inputScale = 1f;
+                outputKind = "alpha";
+            }
+            else if (IsToySeg(f))
+            {
+                inputMean = 123.7f;
+                inputScale = 58.4f;
+                outputKind = "alpha";
+            }
             else
             {
-                inputMean = 123.7f;   // ImageNet — u2net, pidnet, midas, depth anything
+                inputMean = 123.7f;   // ImageNet — u2net, cityscapes pidnet, midas
                 inputScale = 58.4f;
             }
         }
@@ -286,6 +372,9 @@ public class SemanticOcclusion : MonoBehaviour
     public float LastRunMs => _npu.LastRunMs;
     public float LastDecodeMs => _npu.LastDecodeMs;
     public float InferIntervalSeconds => inferIntervalSeconds;
+    public int InferEveryNFrames => inferEveryNFrames;
+    public float HoldSeconds => holdSeconds;
+    public float HoldLeft => _holdLeft;
     public float MaskPeriodMs => _maskPeriodMs;
     public SegBackend Backend => backend;
 
@@ -296,13 +385,34 @@ public class SemanticOcclusion : MonoBehaviour
                (inferIntervalSeconds <= 0f ? " (submit as soon as the worker is free)" : "");
     }
 
+    public string SetInferEveryNFrames(int n)
+    {
+        inferEveryNFrames = Mathf.Max(1, n);
+        return $"segn every {inferEveryNFrames} frame(s)";
+    }
+
+    public string SetHoldSeconds(float seconds)
+    {
+        holdSeconds = Mathf.Max(0f, seconds);
+        if (holdSeconds <= 0f)
+        {
+            _holdLeft = -1f;
+            return "segtimer off (stays loaded until seg off)";
+        }
+        if (_npu.Ready && enableOnStart) _holdLeft = holdSeconds;
+        return $"segtimer {holdSeconds:F0}s then unload";
+    }
+
     bool IsCanny =>
         string.Equals(modelFile, CannyModel, StringComparison.OrdinalIgnoreCase);
+
+    bool IsBench =>
+        string.Equals(modelFile, BenchModel, StringComparison.OrdinalIgnoreCase);
 
     public string SetBackend(SegBackend next)
     {
         backend = next;
-        if (!IsCanny && _modelBytes == null && string.IsNullOrEmpty(_deviceModelPath))
+        if (!IsCanny && !IsBench && _modelBytes == null && string.IsNullOrEmpty(_deviceModelPath))
             return $"seg backend {LabelOf(backend)} (model not loaded yet)";
         if (_reloading)
             return $"seg backend {LabelOf(backend)} (reload already running)";
@@ -321,7 +431,7 @@ public class SemanticOcclusion : MonoBehaviour
     public static string LabelOf(SegBackend b) =>
         b == SegBackend.Cpu ? "CPU"
         : b == SegBackend.Gpu ? "GPU"
-        : b == SegBackend.GpuDec ? "GPUDEC"
+        : b == SegBackend.GpuDec ? "LITERT"
         : "NPU";
 
     string BackendArg(SegBackend b)
@@ -342,7 +452,7 @@ public class SemanticOcclusion : MonoBehaviour
     {
         if (string.IsNullOrEmpty(file)) return false;
         string f = file.ToLowerInvariant();
-        return f.Contains("1024") || f.Contains("isnet") || f.Contains("pidnet");
+        return f.Contains("1024") || f.Contains("isnet");
     }
 
     public bool UseXnnpack
@@ -351,7 +461,7 @@ public class SemanticOcclusion : MonoBehaviour
         set
         {
             useXnnpack = value;
-            if (!IsCanny && (_modelBytes != null || !string.IsNullOrEmpty(_deviceModelPath)) && !_reloading)
+            if (!IsCanny && !IsBench && (_modelBytes != null || !string.IsNullOrEmpty(_deviceModelPath)) && !_reloading)
                 StartCoroutine(ReloadBackend());
         }
     }
@@ -364,17 +474,23 @@ public class SemanticOcclusion : MonoBehaviour
     {
         if (string.IsNullOrWhiteSpace(file)) return $"segmodel {modelFile}";
         modelFile = file.Trim();
+        backend = PreferredBackend(modelFile);
         // A segnorm override belongs to the model it was typed for, not to every model after.
         _normOverridden = false;
         _maskW = _maskH = 0;
+        if (!enableOnStart)
+        {
+            _loadNote = $"idle {modelFile} — tap seg to load";
+            return $"segmodel {modelFile} (not loaded until seg on)";
+        }
         _loadNote = $"loading {modelFile}";
         if (!_reloading) StartCoroutine(LoadModel());
         return $"segmodel {modelFile} — loading";
     }
 
     /// <summary>
-    /// Everything that can be cycled: the models shipped in the APK, plus any .tflite
-    /// pushed to the device since. A pushed file joins the cycle without a rebuild.
+    /// HUD cycle. Intentionally not every .tflite on the device — leftover toy nets
+    /// and mattes still sit in persistentDataPath from earlier pushes.
     /// </summary>
     List<string> Catalogue()
     {
@@ -383,25 +499,6 @@ public class SemanticOcclusion : MonoBehaviour
             foreach (var m in modelFiles)
                 if (!string.IsNullOrWhiteSpace(m) && !_catalogue.Contains(m))
                     _catalogue.Add(m.Trim());
-        if (!_catalogue.Contains(CannyModel))
-            _catalogue.Add(CannyModel);
-
-        try
-        {
-            foreach (var f in Directory.GetFiles(Application.persistentDataPath, "*.tflite"))
-            {
-                string n = Path.GetFileName(f);
-                if (IsRetired(n)) continue;
-                // IS-Net is 176 MB and 80 s/frame. Keep it off the cycle even if the
-                // file is still sitting on the device from the one-shot look.
-                if (new FileInfo(f).Length > 100L * 1024 * 1024) continue;
-                if (!_catalogue.Contains(n)) _catalogue.Add(n);
-            }
-        }
-        catch (Exception)
-        {
-            // No device copies is normal, not an error.
-        }
 
         if (!string.IsNullOrEmpty(modelFile) && IndexInCatalogue(_catalogue, modelFile) < 0)
             _catalogue.Insert(0, modelFile);
@@ -412,6 +509,7 @@ public class SemanticOcclusion : MonoBehaviour
     {
         var all = Catalogue();
         if (all.Count == 0) return "seg: no models";
+        if (all.Count == 1) return $"segmodel {modelFile}";
         int i = IndexInCatalogue(all, modelFile);
         return SetModel(all[(i + 1) % all.Count]);
     }
@@ -444,11 +542,16 @@ public class SemanticOcclusion : MonoBehaviour
         if (string.IsNullOrEmpty(file)) return "?";
         string f = file.ToLowerInvariant();
         if (f == CannyModel) return "canny";
+        if (f == BenchModel) return "bench";
         if (f.Contains("u2net")) return "u2net";
         if (f.Contains("modnet")) return "modnet";
         if (f.Contains("coral") || f.Contains("deeplab")) return "deeplab";
         if (f.Contains("isnet") || f.Contains("dis")) return "isnet";
+        if (f.Contains("mobilenetv4")) return "mnv4";
+        if (f.Contains("fast_scnn")) return "fastscnn";
+        if (f.Contains("bisenet")) return "bisenet";
         if (f.Contains("pidnet")) return "pidnet";
+        if (f.Contains("cnn_s")) return "cnn_s";
         if (f.Contains("midas") || f.Contains("dpt") || f.Contains("depth")) return "depth";
         string n = Path.GetFileNameWithoutExtension(file);
         return n.Length <= 12 ? n : n.Substring(0, 12);
@@ -500,9 +603,21 @@ public class SemanticOcclusion : MonoBehaviour
             return
                 $"seg: {(enableOnStart ? "ON" : "OFF")} {LabelOf(backend)} " +
                 $"{shape} overlay {(debugTint ? "ON" : "off")} " +
-                $"{_npu.Ep}\n" +
+                $"{_npu.Ep}" +
+                (holdSeconds <= 0f ? " hold off"
+                    : _holdLeft >= 0f ? $" hold {_holdLeft:F0}s"
+                    : "") + "\n" +
+                $"  e2e {_stageLast[SE2E]:F0} p50 {StageP50Val(SE2E)}  " +
+                $"copy {_stageLast[SCopy]:F0} unpack {_stageLast[SUnpack]:F0} " +
+                $"paint {_stageLast[SPaint]:F0} upload {_stageLast[SUpload]:F0}\n" +
+                $"  wait-cam {_stageLast[SWaitCam]:F0} blit {_stageLast[SBlit]:F1} " +
+                $"rotate {_stageLast[SRotate]:F1} resize {_stageLast[SResize]:F1} " +
+                $"convert {_stageLast[SConvert]:F0} submit {_stageLast[SSubmit]:F1}\n" +
                 $"  fill {_npu.LastFillMs:F0} run {_npu.LastRunMs:F0} dec {_npu.LastDecodeMs:F0} " +
-                $"per {(_maskPeriodMs < 0f ? "—" : $"{_maskPeriodMs:F0}ms")} int {inferIntervalSeconds:F2}s\n" +
+                $"infer-wait {_stageLast[SInferWait]:F0} " +
+                $"per {(_maskPeriodMs < 0f ? "—" : $"{_maskPeriodMs:F0}ms")} " +
+                $"{(UseGpuCameraInput() ? "gpu-cam" : "cpu-img")} " +
+                $"every {inferEveryNFrames}f / {inferIntervalSeconds:F1}s\n" +
                 $"  {modelFile}\n" +
                 $"  {_loadNote}\n" +
                 $"  {TopClasses(4)}";
@@ -616,21 +731,29 @@ public class SemanticOcclusion : MonoBehaviour
             r.AppendLine($"seg ready          : {_npu.Ready}");
             r.AppendLine($"seg load           : {_loadNote}");
             r.AppendLine($"seg last error     : {_npu.LastError}");
-            r.AppendLine($"seg interval       : {inferIntervalSeconds:F3} s");
+            r.AppendLine($"seg interval       : every {inferEveryNFrames} frames, min {inferIntervalSeconds:F3} s");
+            r.AppendLine($"seg hold           : " +
+                         (holdSeconds <= 0f ? "off"
+                             : _holdLeft >= 0f ? $"{holdSeconds:F0}s ({_holdLeft:F0}s left)"
+                             : $"{holdSeconds:F0}s"));
             r.AppendLine($"seg inference      : {_npu.LastInferenceMs:F2} ms (fill+run+decode)");
             r.AppendLine($"seg fill           : {_npu.LastFillMs:F2} ms" + StageP50("fill", _fillHist));
             r.AppendLine($"seg run            : {_npu.LastRunMs:F2} ms" + StageP50("run", _runHist));
             r.AppendLine($"seg decode         : {_npu.LastDecodeMs:F2} ms" + StageP50("decode", _decodeHist));
+            for (int i = 0; i < StageN; i++)
+                r.AppendLine($"seg {StageName[i],-12} : {_stageLast[i]:F2} ms" + StageP50Idx(i));
             r.AppendLine($"seg mask period    : " +
                          (_maskPeriodMs < 0f ? "n/a" : $"{_maskPeriodMs:F0} ms") +
                          StageP50("period", _periodHist));
             r.AppendLine($"seg input          : {_npu.InputWidth}x{_npu.InputHeight}");
-            r.AppendLine($"seg convert        : {_fitW}x{_fitH}" +
-                         (_fitW == _npu.InputWidth && _fitH == _npu.InputHeight
-                             ? " native, no rescale"
-                             : $" then UPSCALED to {_npu.InputWidth}x{_npu.InputHeight} " +
-                               "(camera cannot supply the tensor size)"));
-            r.AppendLine($"seg camera image   : {_camW}x{_camH} " +
+            r.AppendLine($"seg convert        : {_convertNote}");
+            r.AppendLine($"seg camera source  : " +
+                         (!gpuCameraInput ? "cpu XRCpuImage"
+                             : _gpuInputFailed ? "gpu FAILED, cpu fallback"
+                             : IsCanny ? "cpu (canny)"
+                             : "gpu blit + async readback") +
+                         (gpuBlitFlipY ? ", flipY" : ""));
+            r.AppendLine($"seg camera image   : last {_camW}x{_camH}, gpu tex {_gpuW}x{_gpuH} " +
                          (centreCrop ? "-> centred square, no squash"
                                      : $"-> whole frame squashed x{HorizontalSquash:F2} horizontally"));
             r.AppendLine($"seg rotation       : {RotationDegrees} deg clockwise before inference");
@@ -663,11 +786,17 @@ public class SemanticOcclusion : MonoBehaviour
         if (_camera == null) _camera = FindAnyObjectByType<ARCameraManager>();
         if (_occlusion == null) _occlusion = FindAnyObjectByType<AROcclusionManager>();
         if (_background == null) _background = FindAnyObjectByType<ARCameraBackground>();
-        // The scene still stores the DeepLab 257 filename from before that model was
-        // dropped. A [SerializeField] default does not overwrite a value the scene has
-        // already saved, so without this the load looks for a file that is no longer
-        // in the APK and the HUD sits on "could not read".
-        if (IsRetired(modelFile)) modelFile = DefaultModelFile;
+        // Scene-serialized modelFiles / modelFile win over C# defaults.
+        modelFiles = new[] { BenchModel, DefaultModelFile };
+        if (IsRetired(modelFile) || IndexInCatalogue(new List<string>(modelFiles), modelFile) < 0)
+            modelFile = BenchModel;
+        backend = PreferredBackend(modelFile);
+        enableOnStart = false;
+        holdSeconds = 0f;
+        _holdLeft = -1f;
+        inferEveryNFrames = 1;
+        inferIntervalSeconds = 0f;
+        _loadNote = $"idle {modelFile} — tap seg to load";
     }
 
     void Start()
@@ -688,11 +817,19 @@ public class SemanticOcclusion : MonoBehaviour
         }
 
         ApplyMaterialFlags();
-        StartCoroutine(LoadModel());
+        if (_camera != null)
+            _camera.frameReceived += OnCameraFrame;
+        // Do not LoadModel here. DIS-ISNet is 176 MB; GpuDelegate OpenCL compile of it
+        // hung the S24 (black screen, no HUD, system UI crawling). Tap seg to load.
     }
 
     void OnDestroy()
     {
+        if (_camera != null)
+            _camera.frameReceived -= OnCameraFrame;
+        _wantGpuCapture = false;
+        _gpuReadbackPending = false;
+        ReleaseInferRT();
         _npu.Dispose();
         if (_maskTex != null) Destroy(_maskTex);
         if (_mat != null) Destroy(_mat);
@@ -700,15 +837,31 @@ public class SemanticOcclusion : MonoBehaviour
 
     void Update()
     {
+        if (_holdLeft >= 0f && !_reloading && _npu.Ready)
+        {
+            _holdLeft -= Time.deltaTime;
+            if (_holdLeft <= 0f)
+            {
+                _holdLeft = -1f;
+                _holdUnloaded = true;
+                enableOnStart = false;
+                debugTint = false;
+                ApplyMaterialFlags();
+                StartCoroutine(UnloadModel());
+            }
+        }
+
         if (!enableOnStart || !_npu.Ready || _reloading) return;
 
         CollectResult();
+        TryFinishGpuReadback();
 
+        _frameSkip++;
+        if (_frameSkip < inferEveryNFrames) return;
         _inferTimer += Time.deltaTime;
         if (_inferTimer < inferIntervalSeconds) return;
-        // Only reset the timer once a frame is actually accepted, so a model slower than
-        // the interval submits again the moment the worker frees up instead of waiting.
-        if (_npu.Busy) return;
+        if (_npu.Busy || _gpuReadbackPending || _wantGpuCapture) return;
+        _frameSkip = 0;
         _inferTimer = 0f;
         SubmitFrame();
     }
@@ -716,8 +869,10 @@ public class SemanticOcclusion : MonoBehaviour
     IEnumerator LoadModel()
     {
         _reloading = true;
+        _loadNote = $"loading {modelFile} off-thread";
         // Closing the interpreter while the worker is inside interpreter.run is a native
         // SIGSEGV. Wait until the current job finishes, then tear it down.
+        yield return null;
         while (_npu.Busy) yield return null;
 
         string want = modelFile;
@@ -728,6 +883,13 @@ public class SemanticOcclusion : MonoBehaviour
         if (IsCanny)
         {
             _loadNote = "canny 480² CPU (no tflite)";
+            yield return BindInterpreter();
+            yield break;
+        }
+
+        if (IsBench)
+        {
+            _loadNote = "bench luma 1024² (1-layer stand-in, no tflite)";
             yield return BindInterpreter();
             yield break;
         }
@@ -762,12 +924,13 @@ public class SemanticOcclusion : MonoBehaviour
         _reloading = true;
         while (_npu.Busy) yield return null;
         yield return BindInterpreter();
-        if (enableOnStart && _npu.Ready) SubmitFrame();
+        if (enableOnStart && _npu.Ready && !_unloadAfterBind) SubmitFrame();
     }
 
     bool TryLoad(string backendArg)
     {
         if (IsCanny) return _npu.LoadCanny();
+        if (IsBench) return _npu.LoadBench();
         if (!string.IsNullOrEmpty(_deviceModelPath))
             return _npu.LoadFile(_deviceModelPath, backendArg);
         return _npu.Load(_modelBytes, backendArg);
@@ -776,28 +939,37 @@ public class SemanticOcclusion : MonoBehaviour
     IEnumerator BindInterpreter()
     {
         _reloading = true;
-        bool ok = TryLoad(BackendArg(backend));
-        if (ok && IsCanny)
+        bool ok = false;
+        string refused = null;
+        bool tryFallback = backend != SegBackend.Cpu;
+        string firstArg = BackendArg(backend);
+        SegBackend used = backend;
+
+        yield return RunOffThread(() =>
+        {
+            ok = TryLoad(firstArg);
+            if (!ok && tryFallback)
+            {
+                refused = _npu.LastError;
+                used = SegBackend.Cpu;
+                ok = TryLoad(BackendArg(SegBackend.Cpu));
+            }
+        });
+
+        if (ok && refused != null)
+            backend = SegBackend.Cpu;
+
+        if (ok && (IsCanny || IsBench))
         {
             FinishBind($"CPU {_npu.Ep} {_npu.InputWidth}x{_npu.InputHeight} (no tflite)");
             yield break;
         }
 
-        // ENN and the GPU delegate each refuse graphs the CPU takes without complaint, and
-        // the HUD no longer has a backend button to escape with — so a rejected model would
-        // otherwise be a dead end. Fall back, and say so rather than hiding it.
-        if (!ok && backend != SegBackend.Cpu)
+        if (ok && refused != null)
         {
-            string refused = _npu.LastError;
-            Debug.LogWarning($"[Seg] {LabelOf(backend)} refused {modelFile}. {refused}");
-            backend = SegBackend.Cpu;
-            ok = TryLoad(BackendArg(backend));
-            if (ok)
-            {
-                FinishBind($"CPU {_npu.Ep} {_npu.InputWidth}x{_npu.InputHeight} " +
-                           $"(fell back, NPU/GPU refused: {refused})");
-                yield break;
-            }
+            FinishBind($"CPU {_npu.Ep} {_npu.InputWidth}x{_npu.InputHeight} " +
+                       $"(fell back, NPU/GPU refused: {refused})");
+            yield break;
         }
 
         if (!ok)
@@ -809,8 +981,63 @@ public class SemanticOcclusion : MonoBehaviour
             yield break;
         }
 
-        FinishBind($"{LabelOf(backend)} {_npu.Ep} {_npu.InputWidth}x{_npu.InputHeight} -> {_npu.OutputWidth}x{_npu.OutputHeight}");
+        FinishBind($"{LabelOf(used)} {_npu.Ep} {_npu.InputWidth}x{_npu.InputHeight} -> {_npu.OutputWidth}x{_npu.OutputHeight}");
         yield return null;
+    }
+
+    IEnumerator UnloadModel()
+    {
+        _reloading = true;
+        enableOnStart = false;
+        debugTint = false;
+        ApplyMaterialFlags();
+        while (_npu.Busy) yield return null;
+        _wantGpuCapture = false;
+        _gpuReadbackPending = false;
+        yield return RunOffThread(() => _npu.Dispose());
+        _holdLeft = -1f;
+        _reloading = false;
+        _loadNote = _holdUnloaded
+            ? $"unloaded after {holdSeconds:F0}s — tap seg to load"
+            : $"idle {modelFile} — tap seg to load";
+        _holdUnloaded = false;
+        ApplyMaterialFlags();
+    }
+
+    IEnumerator RunOffThread(Action work)
+    {
+        var done = new ManualResetEventSlim(false);
+        Exception err = null;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+#if UNITY_ANDROID && !UNITY_EDITOR
+                AndroidJNI.AttachCurrentThread();
+#endif
+                work();
+            }
+            catch (Exception e)
+            {
+                err = e;
+            }
+            finally
+            {
+#if UNITY_ANDROID && !UNITY_EDITOR
+                try { AndroidJNI.DetachCurrentThread(); } catch { /* already detached */ }
+#endif
+                done.Set();
+            }
+        });
+        while (!done.IsSet) yield return null;
+        done.Dispose();
+        if (err != null)
+            Debug.LogWarning("[Seg] off-thread: " + err.Message);
+    }
+
+    void ArmHoldTimer()
+    {
+        _holdLeft = holdSeconds > 0f ? holdSeconds : -1f;
     }
 
     void FinishBind(string note)
@@ -826,14 +1053,27 @@ public class SemanticOcclusion : MonoBehaviour
         _stageI = 0;
         _maskPeriodMs = -1f;
         _lastMaskAt = -1f;
+        if (_unloadAfterBind || !enableOnStart)
+        {
+            _unloadAfterBind = false;
+            StartCoroutine(UnloadModel());
+            return;
+        }
+        ArmHoldTimer();
+        if (enableOnStart && _npu.Ready) SubmitFrame();
     }
 
     void RecordStages()
     {
+        _stageLast[SFill] = _npu.LastFillMs;
+        _stageLast[SRun] = _npu.LastRunMs;
+        _stageLast[SDecode] = _npu.LastDecodeMs;
         _fillHist[_stageI] = _npu.LastFillMs;
         _runHist[_stageI] = _npu.LastRunMs;
         _decodeHist[_stageI] = _npu.LastDecodeMs;
         _periodHist[_stageI] = _maskPeriodMs;
+        for (int s = 0; s < StageN; s++)
+            _stageHist[s * StageHistCap + _stageI] = _stageLast[s];
         _stageI = (_stageI + 1) % StageHistCap;
         if (_stageCount < StageHistCap) _stageCount++;
     }
@@ -842,6 +1082,37 @@ public class SemanticOcclusion : MonoBehaviour
     {
         if (_stageCount < 3) return "";
         return $"  p50 {Percentile(hist, _stageCount, 0.5f):F1} ms n={_stageCount}";
+    }
+
+    string StageP50Idx(int id)
+    {
+        if (_stageCount < 3) return "";
+        var tmp = new float[_stageCount];
+        int off = id * StageHistCap;
+        for (int i = 0; i < _stageCount; i++) tmp[i] = _stageHist[off + i];
+        Array.Sort(tmp);
+        int i50 = Mathf.Clamp(Mathf.RoundToInt((_stageCount - 1) * 0.5f), 0, _stageCount - 1);
+        return $"  p50 {tmp[i50]:F1} ms n={_stageCount}";
+    }
+
+    string StageP50Val(int id)
+    {
+        if (_stageCount < 3) return "—";
+        var tmp = new float[_stageCount];
+        int off = id * StageHistCap;
+        for (int i = 0; i < _stageCount; i++) tmp[i] = _stageHist[off + i];
+        Array.Sort(tmp);
+        int i50 = Mathf.Clamp(Mathf.RoundToInt((_stageCount - 1) * 0.5f), 0, _stageCount - 1);
+        return tmp[i50].ToString("F0");
+    }
+
+    static float Now() => Time.realtimeSinceStartup;
+
+    static float MsSince(float t0) => t0 < 0f ? 0f : (Now() - t0) * 1000f;
+
+    void ClearJobStages()
+    {
+        for (int i = 0; i < StageN; i++) _stageLast[i] = 0f;
     }
 
     static float Percentile(float[] src, int n, float p)
@@ -870,28 +1141,41 @@ public class SemanticOcclusion : MonoBehaviour
     }
 
     /// <summary>
-    /// The mask texture spans the whole camera frame so its UV matches the camera texture's
-    /// and the shader needs no remapping. The square inference result is inset into it at a
-    /// 1:1 pixel ratio, chosen so a centre crop loses no mask resolution.
+    /// The mask texture spans the GPU camera frame so its UV matches the camera texture's
+    /// and the shader needs no remapping. The square inference result is inset into that
+    /// canvas at a 1:1 pixel ratio with the CPU crop.
     /// </summary>
     void EnsureMaskGeometry()
     {
         int outW = _npu.OutputWidth, outH = _npu.OutputHeight;
         int mw = outW, mh = outH;
+        int offX = 0, offY = 0;
 
         if (centreCrop && _camW > 0 && _camH > 0)
         {
+            int texW = _gpuW > 16 ? _gpuW : _camW;
+            int texH = _gpuH > 16 ? _gpuH : _camH;
             int side = Mathf.Min(_camW, _camH);
-            mw = Mathf.Max(outW, Mathf.RoundToInt(outW * (float)_camW / side));
-            mh = Mathf.Max(outH, Mathf.RoundToInt(outH * (float)_camH / side));
+            float scale = (float)outW / side;
+
+            CenteredAspectCrop(texW, texH, _camW, _camH,
+                out int cropX, out int cropY, out int cropW, out int cropH);
+
+            float maskPerGpu = (float)(_camW * scale) / Mathf.Max(1, cropW);
+            mw = Mathf.Max(outW, Mathf.RoundToInt(texW * maskPerGpu));
+            mh = Mathf.Max(outH, Mathf.RoundToInt(texH * maskPerGpu));
+            int cpuMw = Mathf.RoundToInt(_camW * scale);
+            int cpuMh = Mathf.RoundToInt(_camH * scale);
+            offX = Mathf.RoundToInt(cropX * maskPerGpu) + (cpuMw - outW) / 2;
+            offY = Mathf.RoundToInt(cropY * maskPerGpu) + (cpuMh - outH) / 2;
         }
 
         if (mw == _maskW && mh == _maskH && _maskTex != null) return;
 
         _maskW = mw;
         _maskH = mh;
-        _offX = (mw - outW) / 2;
-        _offY = (mh - outH) / 2;
+        _offX = offX;
+        _offY = offY;
         _overlay = new byte[mw * mh * 4];
         if (_maskTex != null) Destroy(_maskTex);
         _maskTex = new Texture2D(mw, mh, TextureFormat.RGBA32, false, false)
@@ -905,11 +1189,91 @@ public class SemanticOcclusion : MonoBehaviour
     }
 
     /// <summary>
+    /// Largest centred rectangle of <paramref name="innerW"/>:<paramref name="innerH"/>
+    /// aspect inside <paramref name="outerW"/>x<paramref name="outerH"/>. This is the GPU
+    /// texel box that a CPU image of that aspect occupies when it is a centre-crop of the
+    /// GPU feed (4:3 CPU on a 16:9 camera is the usual case).
+    /// </summary>
+    static void CenteredAspectCrop(
+        int outerW, int outerH, int innerW, int innerH,
+        out int x, out int y, out int w, out int h)
+    {
+        float outerA = (float)outerW / outerH;
+        float innerA = (float)innerW / innerH;
+        if (innerA > outerA)
+        {
+            w = outerW;
+            h = Mathf.Max(1, Mathf.RoundToInt(outerW / innerA));
+            x = 0;
+            y = (outerH - h) / 2;
+        }
+        else
+        {
+            h = outerH;
+            w = Mathf.Max(1, Mathf.RoundToInt(outerH * innerA));
+            y = 0;
+            x = (outerW - w) / 2;
+        }
+    }
+
+    void OnCameraFrame(ARCameraFrameEventArgs args)
+    {
+        if (args.textures == null || args.textures.Count == 0) return;
+        var tex = args.textures[0];
+        if (tex == null || tex.width < 16 || tex.height < 16) return;
+        _gpuCamTex = tex;
+        if (tex.width != _gpuW || tex.height != _gpuH)
+        {
+            _gpuW = tex.width;
+            _gpuH = tex.height;
+            _maskW = _maskH = 0;
+        }
+
+        if (!_wantGpuCapture) return;
+        _wantGpuCapture = false;
+        if (!TryQueueGpuBlit(tex))
+        {
+            _gpuInputFailed = true;
+            _loadNote = "gpu blit failed — falling back to XRCpuImage";
+            Debug.LogWarning("[Seg] " + _loadNote);
+            SubmitCpuImageFrame();
+        }
+    }
+
+    bool UseGpuCameraInput()
+    {
+        return gpuCameraInput
+            && !_gpuInputFailed
+            && !IsCanny
+            && _npu.Ready
+            && _gpuCamTex != null
+            && SystemInfo.supportsAsyncGPUReadback
+            && _npu.InputWidth > 0
+            && _npu.InputHeight > 0;
+    }
+
+    /// <summary>
     /// Grabs a camera frame and queues it. Returns without blocking, so frame time no
     /// longer includes inference.
     /// </summary>
     void SubmitFrame()
     {
+        if (UseGpuCameraInput())
+        {
+            ClearJobStages();
+            _tWant = Now();
+            _tFrame = -1f;
+            _wantGpuCapture = true;
+            return;
+        }
+        SubmitCpuImageFrame();
+    }
+
+    void SubmitCpuImageFrame()
+    {
+        _gpuDisplaySpace = false;
+        ClearJobStages();
+        _tFrame = Now();
         if (_camera == null || !_camera.TryAcquireLatestCpuImage(out var image))
             return;
 
@@ -943,6 +1307,7 @@ public class SemanticOcclusion : MonoBehaviour
             int size = image.GetConvertedDataSize(conv);
             if (_rgbFit == null || _rgbFit.Length < size) _rgbFit = new byte[size];
             var handle = new NativeArray<byte>(size, Allocator.Temp);
+            float tConv = Now();
             try
             {
                 image.Convert(conv, handle);
@@ -951,25 +1316,270 @@ public class SemanticOcclusion : MonoBehaviour
             catch (Exception e)
             {
                 _loadNote = $"convert {_fitW}x{_fitH} failed: {e.Message}";
+                _convertNote = _loadNote;
                 return;
             }
             finally
             {
                 handle.Dispose();
             }
+            _stageLast[SConvert] = MsSince(tConv);
         }
 
         int need = inW * inH * 3;
         if (_rgb == null || _rgb.Length < need) _rgb = new byte[need];
+        float tResize = Now();
         if (_fitW == inW && _fitH == inH)
             Array.Copy(_rgbFit, _rgb, need);
         else
             ResizeRgb(_rgbFit, _fitW, _fitH, _rgb, inW, inH);
+        _stageLast[SResize] = MsSince(tResize);
+
+        _convertNote = $"{_fitW}x{_fitH} cpu" +
+                       (_fitW == inW && _fitH == inH
+                           ? " native, no rescale"
+                           : $" then UPSCALED to {inW}x{inH} (CPU image cannot supply the tensor size)");
 
         EnsureMaskGeometry();
 
-        if (!_npu.Submit(Upright(_rgb)) && !string.IsNullOrEmpty(_npu.LastError))
+        float tRot = Now();
+        byte[] input = Upright(_rgb);
+        _stageLast[SRotate] = MsSince(tRot);
+        float tSub = Now();
+        if (!_npu.Submit(input) && !string.IsNullOrEmpty(_npu.LastError))
             _loadNote = $"submit failed: {_npu.LastError}";
+        _stageLast[SSubmit] = MsSince(tSub);
+        _tSubmit = Now();
+    }
+
+    bool TryQueueGpuBlit(Texture src)
+    {
+        int inW = _npu.InputWidth, inH = _npu.InputHeight;
+        if (src == null || inW < 8 || inH < 8) return false;
+        if (_mat == null) return false;
+        if (!EnsureInferRT(inW, inH)) return false;
+        if (!EnsureCamCopyRT(src.width, src.height)) return false;
+
+        _stageLast[SWaitCam] = MsSince(_tWant);
+        _tFrame = Now();
+        try
+        {
+            // Default Graphics.Blit samples the ARCore Vulkan camera as RGB. That is
+            // YUV-as-RGB: a green field. IS-Net then returns a flat ~0.50 matte and
+            // Ramp paints the whole frame green. The background material already
+            // knows how to sample this texture.
+            float segWas = _mat.GetFloat(IdSeg);
+            _mat.SetFloat(IdSeg, 0f);
+            try
+            {
+                Graphics.Blit(src, _camCopyRT, _mat);
+            }
+            finally
+            {
+                _mat.SetFloat(IdSeg, segWas);
+            }
+
+            SquareCropScaleOffset(_camCopyRT.width, _camCopyRT.height, centreCrop, gpuBlitFlipY,
+                out Vector2 scale, out Vector2 offset);
+            Graphics.Blit(_camCopyRT, _inferRT, scale, offset);
+        }
+        catch (Exception e)
+        {
+            _loadNote = $"gpu blit {src.width}x{src.height}: {e.Message}";
+            return false;
+        }
+        _stageLast[SBlit] = MsSince(_tFrame);
+
+        _gpuDisplaySpace = true;
+        _camW = src.width;
+        _camH = src.height;
+        _fitW = inW;
+        _fitH = inH;
+        _convertNote = $"{inW}x{inH} gpu-blit (ARCore sample) from {src.width}x{src.height}" +
+                       (centreCrop ? ", centred square" : ", squashed") +
+                       (gpuBlitFlipY ? ", flipY" : "");
+        EnsureMaskGeometry();
+
+        _gpuReadback = AsyncGPUReadback.Request(_inferRT, 0, TextureFormat.RGBA32);
+        _gpuReadbackPending = true;
+        _tCopyStart = Now();
+        return true;
+    }
+
+    bool EnsureCamCopyRT(int w, int h)
+    {
+        if (_camCopyRT != null && _camCopyRT.IsCreated() &&
+            _camCopyRT.width == w && _camCopyRT.height == h)
+            return true;
+        ReleaseCamCopyRT();
+        _camCopyRT = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32)
+        {
+            hideFlags = HideFlags.HideAndDontSave,
+            filterMode = FilterMode.Bilinear,
+            wrapMode = TextureWrapMode.Clamp,
+            useMipMap = false,
+            autoGenerateMips = false,
+            name = "SegCamCopyRT"
+        };
+        if (!_camCopyRT.Create())
+        {
+            ReleaseCamCopyRT();
+            return false;
+        }
+        return true;
+    }
+
+    bool EnsureInferRT(int w, int h)
+    {
+        if (_inferRT != null && _inferRT.IsCreated() && _inferRT.width == w && _inferRT.height == h)
+            return true;
+        ReleaseInferRT();
+        _inferRT = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32)
+        {
+            hideFlags = HideFlags.HideAndDontSave,
+            filterMode = FilterMode.Bilinear,
+            wrapMode = TextureWrapMode.Clamp,
+            useMipMap = false,
+            autoGenerateMips = false,
+            name = "SegInferRT"
+        };
+        if (!_inferRT.Create())
+        {
+            ReleaseInferRT();
+            return false;
+        }
+        return true;
+    }
+
+    void ReleaseInferRT()
+    {
+        if (_inferRT != null)
+        {
+            _inferRT.Release();
+            Destroy(_inferRT);
+            _inferRT = null;
+        }
+        ReleaseCamCopyRT();
+    }
+
+    void ReleaseCamCopyRT()
+    {
+        if (_camCopyRT == null) return;
+        _camCopyRT.Release();
+        Destroy(_camCopyRT);
+        _camCopyRT = null;
+    }
+
+    static void SquareCropScaleOffset(
+        int w, int h, bool crop, bool flipY, out Vector2 scale, out Vector2 offset)
+    {
+        if (!crop || w == h)
+        {
+            scale = Vector2.one;
+            offset = Vector2.zero;
+        }
+        else if (w > h)
+        {
+            float x = (w - h) / (2f * w);
+            scale = new Vector2((float)h / w, 1f);
+            offset = new Vector2(x, 0f);
+        }
+        else
+        {
+            float y = (h - w) / (2f * h);
+            scale = new Vector2(1f, (float)w / h);
+            offset = new Vector2(0f, y);
+        }
+        if (flipY)
+        {
+            offset.y += scale.y;
+            scale.y = -scale.y;
+        }
+    }
+
+    void TryFinishGpuReadback()
+    {
+        if (!_gpuReadbackPending) return;
+        if (!_gpuReadback.done) return;
+        _gpuReadbackPending = false;
+        if (_gpuReadback.hasError)
+        {
+            _gpuInputFailed = true;
+            _loadNote = "gpu readback failed — falling back to XRCpuImage";
+            Debug.LogWarning("[Seg] " + _loadNote);
+            return;
+        }
+        if (!_npu.Ready || _reloading) return;
+
+        _stageLast[SCopy] = MsSince(_tCopyStart);
+
+        NativeArray<byte> data;
+        try
+        {
+            data = _gpuReadback.GetData<byte>();
+        }
+        catch (Exception e)
+        {
+            _gpuInputFailed = true;
+            _loadNote = $"gpu readback GetData: {e.Message}";
+            Debug.LogWarning("[Seg] " + _loadNote);
+            return;
+        }
+
+        int inW = _npu.InputWidth, inH = _npu.InputHeight;
+        int px = inW * inH;
+        int need = px * 3;
+        if (_rgb == null || _rgb.Length < need) _rgb = new byte[need];
+        int srcPx = Mathf.Min(px, data.Length / 4);
+        float tUnpack = Now();
+        for (int i = 0; i < srcPx; i++)
+        {
+            int s = i * 4;
+            int d = i * 3;
+            _rgb[d] = data[s];
+            _rgb[d + 1] = data[s + 1];
+            _rgb[d + 2] = data[s + 2];
+        }
+        _stageLast[SUnpack] = MsSince(tUnpack);
+
+        if (LooksLikeBadCameraInput(_rgb, srcPx))
+        {
+            _gpuInputFailed = true;
+            _loadNote = "gpu blit was not a camera image — falling back to XRCpuImage";
+            Debug.LogWarning("[Seg] " + _loadNote);
+            return;
+        }
+
+        float tRot = Now();
+        byte[] input = _gpuDisplaySpace ? _rgb : Upright(_rgb);
+        _stageLast[SRotate] = MsSince(tRot);
+        float tSub = Now();
+        if (!_npu.Submit(input) && !string.IsNullOrEmpty(_npu.LastError))
+            _loadNote = $"submit failed: {_npu.LastError}";
+        _stageLast[SSubmit] = MsSince(tSub);
+        _tSubmit = Now();
+    }
+
+    /// <summary>
+    /// Y sampled as RGB is G-dominant; an unwritten RT is near-black. Either one made
+    /// IS-Net return a flat 0.50 matte and Ramp wash the frame green.
+    /// </summary>
+    static bool LooksLikeBadCameraInput(byte[] rgb, int px)
+    {
+        if (px < 64) return false;
+        long r = 0, g = 0, b = 0;
+        int step = Mathf.Max(1, px / 2048);
+        int n = 0;
+        for (int i = 0; i < px; i += step)
+        {
+            r += rgb[i * 3];
+            g += rgb[i * 3 + 1];
+            b += rgb[i * 3 + 2];
+            n++;
+        }
+        if (n == 0) return false;
+        if ((r + g + b) < n * 24) return true;
+        return g > r * 3 / 2 && g > b * 3 / 2;
     }
 
     /// <summary>Takes a finished label map, if one is waiting, and rebuilds the mask.</summary>
@@ -984,24 +1594,34 @@ public class SemanticOcclusion : MonoBehaviour
         }
 
         _labels = labels;
-        float now = Time.realtimeSinceStartup;
+        float now = Now();
         if (_lastMaskAt >= 0f)
             _maskPeriodMs = (now - _lastMaskAt) * 1000f;
         _lastMaskAt = now;
-        RecordStages();
+        _stageLast[SInferWait] = MsSince(_tSubmit);
         // Coral keeps the thing/stuff vote. Mattes (MODNet and friends) now pack a
         // depth into alpha so the silhouette occludes; inverse-depth maps stay tint-only
         // because their range is not metres.
-        if (_npu.ScalarOutput || IsCanny) PaintScalarView();
+        float tPaint = Now();
+        if (_npu.ScalarOutput || IsCanny || IsBench) PaintScalarView();
         else if (_npu.OutputChannels == 19) PaintClassView();
         else
         {
             GrabDepth();
             VoteAndExpand();
         }
-        if (_maskTex == null) return;
+        _stageLast[SPaint] = MsSince(tPaint);
+        if (_maskTex == null)
+        {
+            RecordStages();
+            return;
+        }
+        float tUp = Now();
         _maskTex.LoadRawTextureData(_overlay);
         _maskTex.Apply(false, false);
+        _stageLast[SUpload] = MsSince(tUp);
+        _stageLast[SE2E] = MsSince(_tFrame);
+        RecordStages();
     }
 
     /// <summary>Bilinear RGB24 rescale, for models whose input exceeds the camera image.</summary>
@@ -1050,6 +1670,10 @@ public class SemanticOcclusion : MonoBehaviour
     /// </summary>
     int EffectiveRotation()
     {
+        // ARCore-material blit is already in display UV, same space the shader samples
+        // the mask with. Rotating again would lie the photo down and un-rotate the labels
+        // off the overlay.
+        if (_gpuDisplaySpace) return 0;
         int rot = RotationDegrees;
         if (rot != 90 && rot != 270) return rot;
         if (_npu.InputWidth != _npu.InputHeight) return 0;
@@ -1130,8 +1754,30 @@ public class SemanticOcclusion : MonoBehaviour
         string f = file.ToLowerInvariant();
         return f == "deeplabv3_257_mv_gpu.tflite"
             || f == "deeplabv3_mnv2_pascal_8bit.tflite"
-            || f == "dis_isnet_1024.tflite"
+            || f == "coral_deeplabv3_mnv2_pascal_quant.tflite"
             || f.StartsWith("mediapipe_selfie");
+    }
+
+    static bool IsToySeg(string file)
+    {
+        if (string.IsNullOrEmpty(file)) return false;
+        string f = file.ToLowerInvariant();
+        return f.Contains("fast_scnn") || f.Contains("bisenet")
+            || f.Contains("mobilenetv4") || f.Contains("pidnet_s")
+            || f.Contains("cnn_s");
+    }
+
+    static SegBackend PreferredBackend(string file)
+    {
+        if (string.Equals(file, CannyModel, StringComparison.OrdinalIgnoreCase))
+            return SegBackend.Cpu;
+        if (string.Equals(file, BenchModel, StringComparison.OrdinalIgnoreCase))
+            return SegBackend.Cpu;
+        if (IsToySeg(file)) return SegBackend.GpuDec;
+        string f = (file ?? string.Empty).ToLowerInvariant();
+        if (f.Contains("isnet") || f.Contains("dis_"))
+            return SegBackend.GpuDec;
+        return SegBackend.Cpu;
     }
 
     /// <summary>
@@ -1204,20 +1850,23 @@ public class SemanticOcclusion : MonoBehaviour
         {
             GrabDepth();
             packedMetres = MatteFallbackMetres();
-            float nearest = 0f;
-            for (int y = 0; y < h; y++)
+            if (_depthW > 0)
             {
-                for (int x = 0; x < w; x++)
+                float nearest = 0f;
+                for (int y = 0; y < h; y++)
                 {
-                    int v = _labels[y * w + x];
-                    if (v < scalarFloor) continue;
-                    float metres = DepthAt(x, y, w, h, out _);
-                    if (metres <= 0f) continue;
-                    if (maxOcclusionDistance > 0f && metres >= maxOcclusionDistance) continue;
-                    if (nearest <= 0f || metres < nearest) nearest = metres;
+                    for (int x = 0; x < w; x++)
+                    {
+                        int v = _labels[y * w + x];
+                        if (v < scalarFloor) continue;
+                        float metres = DepthAt(x, y, w, h, out _);
+                        if (metres <= 0f) continue;
+                        if (maxOcclusionDistance > 0f && metres >= maxOcclusionDistance) continue;
+                        if (nearest <= 0f || metres < nearest) nearest = metres;
+                    }
                 }
+                if (nearest > 0f) packedMetres = nearest;
             }
-            if (nearest > 0f) packedMetres = nearest;
             _mattePackedMetres = packedMetres;
         }
 

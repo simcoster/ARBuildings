@@ -1,0 +1,110 @@
+# state 2026-09-20 14:44:39
+build stamp        : 2026-09-20 14:40:59
+site id            : synagogue-01
+phase              : WaitingForEarth
+readout            : EarthState: Enabled | tracking: None | location: DISABLED on device — turn Location on | Point at building facades and walk sideways
+configured lat/lng : 32.0837890, 34.8145810
+altitude above ter : 0
+location service   : DISABLED on device — turn Location on
+earth state        : Enabled
+earth tracking     : None
+can save coords    : nothing placed yet
+preview active     : False
+
+adjust site        : 
+adjust rot         : 0.00 deg
+adjust scale       : 1.000x wide / 1.000x tall (aspect LOCKED)
+adjust E / N / up  : 0.00 / 0.00 / 0.00 m
+baked coordinates  : none
+unsaved changes    : False
+last save message  : nothing saved to clear
+adjustments file   : /storage/emulated/0/Android/data/com.pavel.arbuildings/files/adjustments.json
+
+model file         : synagogue.glb
+load state         : Idle ()
+renderers          : 0
+material shaders   : unknown
+size mode          : FootprintWidth (axis Z, target 10 m)
+applied scale      : x1.0000
+recenter on anchor : True
+model height       : 0.00 m (alignment-root metres)
+world bounds@load  : 0.0 x 0.0 x 0.0 m
+cull bounds now    : no model
+
+sun computed az/el : 231.0 / 46.4 deg
+north offset       : 0.0 deg (GUESSED - shadows meaningless)
+forced daylight    : False
+sun light          : enabled=True intensity=2.00 colour=RGBA(0.449, 0.499, 0.487, 1.000)
+sun world forward  : (0.54, -0.72, 0.43)
+sun direction from : computed solar position
+estimation mode    : AmbientSphericalHarmonics, MainLightDirection, MainLightIntensity
+estimated dir      : (-0.33, -0.88, 0.35)
+estimated lumens   : 0
+estimated colour   : RGBA(0.449, 0.499, 0.487, 1.000)
+ambient lobes      : 2 (directionality 1.28x)
+exposure           : 0.00 EV (driven True)
+intensity divisor  : 1000
+
+depth occlusion    : OFF
+depth manager      : enabled=False (the lever — a disabled manager clears the background keyword)
+depth requested    : Disabled, preference NoOcclusion
+depth current      : Disabled, preference NoOcclusion
+depth texture      : none
+depth at centre    : not sampled (occlusion off)
+
+seg occlusion      : ON
+seg backend        : CPU (cpu)
+seg model          : bench
+seg EP             : bench luma 1024
+seg ready          : True
+seg load           : CPU bench luma 1024 1024x1024 (no tflite)
+seg last error     : 
+seg interval       : every 1 frames, min 0.000 s
+seg hold           : off
+seg inference      : 8.55 ms (fill+run+decode)
+seg fill           : 0.00 ms  p50 0.0 ms n=32
+seg run            : 8.55 ms  p50 6.8 ms n=32
+seg decode         : 0.00 ms  p50 0.0 ms n=32
+seg wait-cam     : 11.86 ms  p50 5.0 ms n=32
+seg blit         : 0.04 ms  p50 0.0 ms n=32
+seg copy         : 98.71 ms  p50 94.2 ms n=32
+seg unpack       : 4.87 ms  p50 5.2 ms n=32
+seg convert      : 0.00 ms  p50 0.0 ms n=32
+seg resize       : 0.00 ms  p50 0.0 ms n=32
+seg rotate       : 0.00 ms  p50 0.0 ms n=32
+seg submit       : 92.54 ms  p50 93.9 ms n=32
+seg fill         : 0.00 ms  p50 0.0 ms n=32
+seg run          : 0.00 ms  p50 6.8 ms n=32
+seg decode       : 0.00 ms  p50 0.0 ms n=32
+seg infer-wait   : 0.00 ms  p50 36.2 ms n=32
+seg paint        : 0.00 ms  p50 41.3 ms n=32
+seg upload       : 0.00 ms  p50 0.7 ms n=32
+seg e2e          : 0.00 ms  p50 272.1 ms n=32
+seg mask period    : 242 ms  p50 272.5 ms n=32
+seg input          : 1024x1024
+seg convert        : 1024x1024 gpu-blit (ARCore sample) from 1920x1080, centred square, flipY
+seg camera source  : gpu blit + async readback, flipY
+seg camera image   : last 1920x1080, gpu tex 1920x1080 -> centred square, no squash
+seg rotation       : 90 deg clockwise before inference
+seg mask texture   : 1820x1024 covering the frame, inset +398,+0
+seg labels         : 1024x1024 c=1
+seg output tensor  : BENCH luma 1024x1024 (1-layer stand-in, no tflite)
+seg output kind    : alpha -> alpha (bench luma) — matte occludes. raw 0.0000 .. 0.8824
+seg normalisation  : (v-0.0)/1.0
+segmin             : 50 px
+seg max distance   : 12.0 m
+seg occluder shape : silhouette mask
+seg debug          : ON
+seg raw 0.0000 .. 0.8824 [alpha -> alpha (bench luma)]
+  painted 99.9% over 8 | median code 121 | occlude 2.0 m
+seg thing/stuff    : 1047578 / 0 px
+seg components     : 1 expanded 1
+seg mask           : 1820x1024
+
+quality: AUTO C  47.7 ms / 36 drop / 28 recover
+  shadows 60 m (TierC_RPAsset, 1 casc) - from A, dropped 2x, recovered 0x, at floor
+  auto on  quality level 2
+  pipeline TierC_RPAsset
+cpu                : 16% (proc/self)
+gpu                : 0% (gpu_busy)
+npu                : 0% (cpu)

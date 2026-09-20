@@ -305,7 +305,7 @@ public class DebugHud : MonoBehaviour
             _captureResult = DebugCapture.Take(geospatial, loader, nudge, lighting, Placement);
 
         if (_captureResult != "")
-            GUI.Label(new Rect(w - pad - w * 0.42f, pad + btnH * 8.4f, w * 0.4f, btnH),
+            GUI.Label(new Rect(w - pad - w * 0.42f, pad + btnH * 9.6f, w * 0.4f, btnH),
                       _captureResult, _label);
 
         float previewY = qualityY + btnH * 1.25f;

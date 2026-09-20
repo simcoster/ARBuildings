@@ -3,27 +3,33 @@ package com.pavel.arbuildings;
 import org.tensorflow.lite.DataType;
 import org.tensorflow.lite.Interpreter;
 import org.tensorflow.lite.Tensor;
-import org.tensorflow.lite.gpu.GpuDelegate;
-import org.tensorflow.lite.nnapi.NnApiDelegate;
+
+import com.google.ai.edge.litert.Accelerator;
+import com.google.ai.edge.litert.CompiledModel;
+import com.google.ai.edge.litert.TensorBuffer;
 
 import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.List;
 import java.util.Locale;
 
 /**
  * TFLite wrapper for a single-input image segmenter.
  *
  * Four backends:
- *   cpu    — XNNPACK only (~18 ms on this DeepLab)
- *   gpu    — NNAPI hybrid (GPU/NPU/CPU as NNAPI picks, CPU fallback on)
- *   gpudec — Mali GpuDelegate from tensorflow-lite-gpu. Fail closed on REJECT.
- *   npu    — NNAPI accelerator "enn", CPU disabled. Fail closed on REJECT.
+ *   cpu    — XNNPACK only
+ *   gpu    — XNNPACK (LiteRT 2.1 Interpreter is CPU-only; no NnApiDelegate in this AAR)
+ *   gpudec — LiteRT CompiledModel(GPU) for DIS-ISNet
+ *   npu    — same as gpu; ENN NNAPI is gone with classic tensorflow-lite
  */
 public final class NpuSegmenter {
     private Interpreter interpreter;
-    private NnApiDelegate nnapi;
-    private GpuDelegate gpu;
+    private CompiledModel compiled;
+    private List<TensorBuffer> compiledInBufs;
+    private List<TensorBuffer> compiledOutBufs;
+    private float[] compiledIn;
+    private String compiledPath;
     private String lastError = "";
     private String ep = "none";
     private float lastMs = -1f;
@@ -73,13 +79,18 @@ public final class NpuSegmenter {
     public int outputWidth() { return outW; }
     public int outputHeight() { return outH; }
     public int outputChannels() { return outC; }
-    public boolean ready() { return interpreter != null || canny; }
+    public boolean ready() { return interpreter != null || compiled != null || compiledPath != null || canny || bench; }
 
     // No TFLite. Same worker, same RGB in / byte-map out as a matte. 480 is the largest
     // square the A35 camera CPU image (640x480) can feed without upscaling.
     private static final int CANNY_SIZE = 480;
     private boolean canny;
     private int[] cGray, cBlur, cMag, cNms, cStack;
+
+    // Latency probe: 1024² like DIS, but the "network" is luma. Isolates blit / copy /
+    // rotate / paint from LiteRT fill+readFloat.
+    private static final int BENCH_SIZE = 1024;
+    private boolean bench;
 
     public void setNormalization(float mean, float scale) {
         inMean = mean;
@@ -118,7 +129,7 @@ public final class NpuSegmenter {
      * integer type, means an argmax has already been applied and it stays on the label path.
      */
     public boolean scalarOutput() {
-        if (canny) return true;
+        if (canny || bench) return true;
         if ("labels".equals(kind)) return false;
         return outC <= 1 && outType == DataType.FLOAT32;
     }
@@ -148,6 +159,29 @@ public final class NpuSegmenter {
         cNms = new int[n];
         cStack = new int[n];
         ep = "canny";
+        lastError = "";
+        return true;
+    }
+
+    /**
+     * One-layer stand-in at DIS resolution. Rec.601 luma written as a 0..255 matte.
+     * No interpreter, so fill and decode are zero and run is a 1024² loop.
+     */
+    public boolean loadBench() {
+        close();
+        inW = inH = outW = outH = BENCH_SIZE;
+        inC = 3;
+        outC = 1;
+        nchw = false;
+        outNchw = false;
+        inType = DataType.UINT8;
+        outType = DataType.FLOAT32;
+        bench = true;
+        kind = "alpha";
+        lastScalarMode = "alpha (bench luma)";
+        lastMin = 0f;
+        lastMax = 1f;
+        ep = "bench luma 1024";
         lastError = "";
         return true;
     }
@@ -193,6 +227,13 @@ public final class NpuSegmenter {
             ep = "REJECT";
             return false;
         }
+        if (useCompiledGpu(backend, path)) {
+            compiledPath = path;
+            describeDisLiteRt();
+            ep = "litert-gpu";
+            lastError = "";
+            return true;
+        }
         try {
             interpreter = new Interpreter(file, optionsFor(backend));
             describe();
@@ -204,6 +245,27 @@ public final class NpuSegmenter {
             close();
             return false;
         }
+    }
+
+    private static boolean useCompiledGpu(String backend, String path) {
+        String b = backend == null ? "" : backend.toLowerCase(Locale.US);
+        if (!("gpudec".equals(b) || "litert".equals(b))) return false;
+        String n = path == null ? "" : new File(path).getName().toLowerCase(Locale.US);
+        return n.contains("isnet") || n.contains("dis");
+    }
+
+    /** DIS-ISNet LiteRT I/O is fixed: NCHW 1024² RGB in, NCHW 1024² sigmoid out. */
+    private void describeDisLiteRt() {
+        nchw = true;
+        inC = 3;
+        inH = inW = 1024;
+        outNchw = true;
+        outC = 1;
+        outH = outW = 1024;
+        inType = DataType.FLOAT32;
+        outType = DataType.FLOAT32;
+        compiledIn = new float[inC * inH * inW];
+        kind = "alpha";
     }
 
     private Interpreter.Options optionsFor(String backend) {
@@ -222,35 +284,14 @@ public final class NpuSegmenter {
             // XNNPACK native-crashes instead of throwing.
             iopt.setUseXNNPACK(false);
             ep = "cpu-builtin";
-        } else if ("gpu".equals(b)) {
-            NnApiDelegate.Options opt = new NnApiDelegate.Options();
-            opt.setUseNnapiCpu(true);
-            nnapi = new NnApiDelegate(opt);
-            iopt.addDelegate(nnapi);
-            ep = "nnapi-hybrid";
-        } else if ("gpudec".equals(b)) {
-            // Mali GpuDelegate, not NNAPI. `seg gpu` is the hybrid path and has never
-            // been this. If the graph has an op the delegate refuses, load throws and
-            // we fail closed — that IS the measurement.
-            org.tensorflow.lite.gpu.CompatibilityList compat =
-                    new org.tensorflow.lite.gpu.CompatibilityList();
-            try {
-                if (!compat.isDelegateSupportedOnThisDevice())
-                    throw new IllegalStateException("GpuDelegate not supported on this device");
-                gpu = new GpuDelegate(compat.getBestOptionsForThisDevice());
-            } finally {
-                compat.close();
-            }
-            iopt.addDelegate(gpu);
-            iopt.setUseXNNPACK(false);
-            ep = "gpu-delegate";
+        } else if ("gpu".equals(b) || "gpudec".equals(b) || "npu".equals(b)) {
+            // DIS uses CompiledModel GPU in loadFile, not this Interpreter path.
+            // LiteRT 2.1 Interpreter is CPU-only and does not ship NnApiDelegate.
+            iopt.setUseXNNPACK(true);
+            ep = "xnnpack (no nnapi in LiteRT)";
         } else {
-            NnApiDelegate.Options opt = new NnApiDelegate.Options();
-            opt.setAcceleratorName("enn");
-            opt.setUseNnapiCpu(false);
-            nnapi = new NnApiDelegate(opt);
-            iopt.addDelegate(nnapi);
-            ep = "enn";
+            iopt.setUseXNNPACK(true);
+            ep = "xnnpack";
         }
         return iopt;
     }
@@ -316,7 +357,7 @@ public final class NpuSegmenter {
      * length of the inference, which on this phone made frame time equal inference time.
      */
     public byte[] inferLabels(byte[] rgb) {
-        if (interpreter == null && !canny) {
+        if (interpreter == null && compiled == null && compiledPath == null && !canny && !bench) {
             lastError = "not loaded";
             return null;
         }
@@ -340,6 +381,22 @@ public final class NpuSegmenter {
                 lastMs = runMs;
                 lastError = "";
                 return out;
+            }
+
+            if (bench) {
+                byte[] out = new byte[outW * outH];
+                long tRun = System.nanoTime();
+                runBenchLuma(rgb, out);
+                runMs = (System.nanoTime() - tRun) / 1e6f;
+                fillMs = 0f;
+                decodeMs = 0f;
+                lastMs = runMs;
+                lastError = "";
+                return out;
+            }
+
+            if (compiledPath != null || compiled != null) {
+                return runCompiled(rgb);
             }
 
             long tFill = System.nanoTime();
@@ -374,7 +431,7 @@ public final class NpuSegmenter {
      * already in flight and this frame should be dropped. Poll {@link #pollLabels()}.
      */
     public boolean submit(byte[] rgb) {
-        if (interpreter == null && !canny) {
+        if (interpreter == null && compiled == null && compiledPath == null && !canny && !bench) {
             lastError = "not loaded";
             return false;
         }
@@ -471,6 +528,88 @@ public final class NpuSegmenter {
     }
 
     /**
+     * LiteRT CompiledModel GPU — the HuggingFace DIS card path, not TfLiteGpuDelegateV2.
+     * First call compiles (can be seconds); later calls are run(). Must happen on this
+     * worker, not Unity's thread: GLES and LiteRT-CL fighting on the render thread is
+     * what wedged the S24 when the HUD's seg button ran Interpreter+GpuDelegate there.
+     */
+    private byte[] runCompiled(byte[] rgb) throws Exception {
+        if (compiled == null) {
+            long tLoad = System.nanoTime();
+            CompiledModel.Options opts = new CompiledModel.Options(Accelerator.GPU);
+            compiled = CompiledModel.create(compiledPath, opts);
+            compiledInBufs = compiled.createInputBuffers();
+            compiledOutBufs = compiled.createOutputBuffers();
+            float compileMs = (System.nanoTime() - tLoad) / 1e6f;
+            ep = String.format(Locale.US, "litert-gpu compile %.0fms", compileMs);
+            lastError = "";
+            runMs = compileMs;
+        }
+
+        long tFill = System.nanoTime();
+        int px = inW * inH;
+        int i = 0;
+        for (int c = 0; c < 3; c++)
+            for (int p = 0; p < px; p++)
+                compiledIn[i++] = ((rgb[p * 3 + c] & 0xff) - inMean) / inScale;
+        compiledInBufs.get(0).writeFloat(compiledIn);
+        fillMs = (System.nanoTime() - tFill) / 1e6f;
+
+        long tRun = System.nanoTime();
+        compiled.run(compiledInBufs, compiledOutBufs);
+        runMs = (System.nanoTime() - tRun) / 1e6f;
+
+        long tDec = System.nanoTime();
+        float[] src = compiledOutBufs.get(0).readFloat();
+        byte[] out = new byte[outW * outH];
+        decodeScalarFloats(src, out);
+        decodeMs = (System.nanoTime() - tDec) / 1e6f;
+        lastMs = fillMs + runMs + decodeMs;
+        lastError = "";
+        return out;
+    }
+
+    private void decodeScalarFloats(float[] src, byte[] out) {
+        int n = outW * outH;
+        int use = Math.min(n, src.length);
+        boolean forceAlpha = "alpha".equals(kind);
+        if (forceAlpha) {
+            float min = Float.MAX_VALUE;
+            float max = -Float.MAX_VALUE;
+            for (int i = 0; i < n; i++) {
+                float v = i < use ? src[i] : 0f;
+                if (v < min) min = v;
+                if (v > max) max = v;
+                int b = (int) (v * 255f + 0.5f);
+                out[i] = (byte) (b < 0 ? 0 : (b > 255 ? 255 : b));
+            }
+            lastMin = min;
+            lastMax = max;
+            lastScalarMode = "alpha (absolute)";
+            return;
+        }
+        float min = Float.MAX_VALUE;
+        float max = -Float.MAX_VALUE;
+        for (int i = 0; i < use; i++) {
+            float v = src[i];
+            if (v < min) min = v;
+            if (v > max) max = v;
+        }
+        lastMin = min;
+        lastMax = max;
+        boolean absolute = "auto".equals(kind) && min >= -0.05f && max <= 1.05f;
+        lastScalarMode = absolute ? "alpha (absolute)" : "depth (stretched)";
+        float span = max - min;
+        boolean flat = span <= 1e-9f;
+        for (int i = 0; i < n; i++) {
+            float v = i < use ? src[i] : 0f;
+            float t = absolute ? v : (flat ? 0f : (v - min) / span);
+            int b = (int) (t * 255f + 0.5f);
+            out[i] = (byte) (b < 0 ? 0 : (b > 255 ? 255 : b));
+        }
+    }
+
+    /**
      * A continuous single channel, quantised to 0..255 so it travels through the same byte
      * array the label maps use. Two passes: the range has to be known before anything can
      * be mapped into it.
@@ -511,6 +650,9 @@ public final class NpuSegmenter {
     /** e.g. "FLOAT32 [1,257,257,21] 5.5 MB" — the line that identifies a decode mismatch. */
     public String outputSpec() {
         if (canny) return "CANNY " + outW + "x" + outH + " 0/255 edges";
+        if (bench) return "BENCH luma " + outW + "x" + outH + " (1-layer stand-in, no tflite)";
+        if (compiled != null || compiledPath != null)
+            return "FLOAT32 " + outW + "x" + outH + "x" + outC + " NCHW litert-gpu";
         if (outBuf == null) return "n/a";
         int n = Math.max(1, outW * outH);
         return outType + " " + outW + "x" + outH + "x" + outC
@@ -579,6 +721,23 @@ public final class NpuSegmenter {
             }
             labelsOut[i] = (byte) best;
         }
+    }
+
+    /** Rec.601 luma. The 1x1 conv stand-in for latency: same 1024² I/O as DIS, no weights. */
+    private void runBenchLuma(byte[] rgb, byte[] out) {
+        int n = outW * outH;
+        float min = Float.MAX_VALUE, max = -Float.MAX_VALUE;
+        for (int i = 0, p = 0; i < n; i++, p += 3) {
+            int y = ((rgb[p] & 0xff) * 77 + (rgb[p + 1] & 0xff) * 150
+                    + (rgb[p + 2] & 0xff) * 29) >> 8;
+            out[i] = (byte) y;
+            float v = y * (1f / 255f);
+            if (v < min) min = v;
+            if (v > max) max = v;
+        }
+        lastMin = min;
+        lastMax = max;
+        lastScalarMode = "alpha (bench luma)";
     }
 
     /**
@@ -727,18 +886,27 @@ public final class NpuSegmenter {
             interpreter.close();
             interpreter = null;
         }
-        if (gpu != null) {
-            gpu.close();
-            gpu = null;
+        if (compiled != null) {
+            try { compiled.close(); } catch (Throwable ignored) { }
+            compiled = null;
         }
-        if (nnapi != null) {
-            nnapi.close();
-            nnapi = null;
+        if (compiledInBufs != null) {
+            for (TensorBuffer b : compiledInBufs)
+                try { b.close(); } catch (Throwable ignored) { }
+            compiledInBufs = null;
         }
+        if (compiledOutBufs != null) {
+            for (TensorBuffer b : compiledOutBufs)
+                try { b.close(); } catch (Throwable ignored) { }
+            compiledOutBufs = null;
+        }
+        compiledIn = null;
+        compiledPath = null;
         inBuf = null;
         outBuf = null;
         pending = null;
         canny = false;
+        bench = false;
         cGray = cBlur = cMag = cNms = cStack = null;
     }
 }

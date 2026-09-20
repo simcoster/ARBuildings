@@ -53,7 +53,7 @@ if (Test-Path (Join-Path $repo 'Temp/UnityLockfile')) {
 }
 
 $target = Get-ChildItem -Path (Join-Path $repo 'Library/PackageCache') -Recurse -Filter 'Google.Protobuf.dll' -ErrorAction SilentlyContinue |
-          Where-Object { $_.FullName -like '*arcore*' } |
+          Where-Object { $_.FullName -match 'ar\.core|arcore' -and $_.FullName -notmatch '\\.Runtime\\' } |
           Select-Object -First 1
 
 if ($null -eq $target) {

@@ -1,4 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     package="com.pavel.arbuildings.npu">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Unity's application tag defaults cleartext off; tools:replace is what actually
+         wins the merger. LAN JPEG posts to the desk IS-Net server are http://. -->
+    <application
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        tools:replace="android:usesCleartextTraffic,android:networkSecurityConfig" />
 </manifest>

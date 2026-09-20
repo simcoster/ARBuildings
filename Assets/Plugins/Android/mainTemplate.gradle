@@ -10,7 +10,8 @@ dependencies {
 // Android Resolver Dependencies End
     // Outside the Resolver block on purpose — EDM periodically rewrites that
     // region and has already stripped play-services-location three times.
-    implementation 'org.tensorflow:tensorflow-lite:2.16.1'
+    // LiteRT replaces tensorflow-lite:2.16.1 — same org.tensorflow.lite.* class names.
+    implementation 'com.google.ai.edge.litert:litert:2.1.0'
 **DEPS**}
 
 // Android Resolver Exclusions Start

@@ -62,6 +62,32 @@ public sealed class NpuSegmenterClient : IDisposable
 #endif
     }
 
+    public bool LoadBench()
+    {
+        Dispose();
+#if UNITY_ANDROID && !UNITY_EDITOR
+        try
+        {
+            _java = new AndroidJavaObject("com.pavel.arbuildings.NpuSegmenter");
+            bool ok = _java.Call<bool>("loadBench");
+            return FinishLoad(ok);
+        }
+        catch (Exception e)
+        {
+            LastError = e.Message;
+            Ep = "REJECT";
+            Ready = false;
+            Dispose();
+            return false;
+        }
+#else
+        LastError = "bench segmenter is Android-only";
+        Ep = "REJECT";
+        Ready = false;
+        return false;
+#endif
+    }
+
     public bool LoadFile(string path, string backend)
     {
         Dispose();

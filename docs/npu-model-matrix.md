@@ -306,3 +306,31 @@ nothing" kind:
 
 Working on device 2026-08-30. HUD should read `alpha (canny) N px` and
 `raw 0.0000 .. 1.0000`, not a zero range.
+
+---
+
+## PC WiFi IS-Net — tried 2026-09-12, dropped the same evening
+
+Phone JPEG → desk `seg_server.py` (fine-tuned IS-Net 1024, CUDA) → PNG mask,
+inverted so the toy is a hole and the rest of the camera occludes the GLB.
+
+It **did run** on the A35 (`phone connected  10.0.0.13`, infer ~80 ms on the
+4070) after the host was set to `10.0.0.5:8787`. Two things killed it as a
+desk tool:
+
+1. **~1 Hz.** Encode + Wi-Fi RTT + 1024 letterbox + one-in-flight POST. The
+   GPU was not the wait; the round trip was.
+2. **Blotchy.** JPEG 480×640, mask upsampled to the camera, no temporal
+   hold. Fine-tuned PyTorch on the same PC looked sharp in `webcam.py`; this
+   path did not.
+
+Also burned time: default host `192.168.1.1`, Unity `insecureHttpOption`
+NotAllowed hanging `UnityWebRequest` (phone could `nc` `/health` the whole
+time). Not the reason it looked bad once frames flowed.
+
+Do not resume this as the occlusion path. Next is on-device
+[DIS-ISNet-LiteRT](https://huggingface.co/litert-community/DIS-ISNet-LiteRT)
+(`dis.tflite` = `occ_models/dis_isnet_1024.tflite`), stock, LiteRT GPU.
+S24 Ultra is the phone that might actually make 1024² viable (Pixel 8a card
+says ~11 ms `CompiledModel` GPU; this app's TfLiteGpuDelegateV2 was **193 ms**
+on the S24, 2026-08-29). Those are different runtimes.
