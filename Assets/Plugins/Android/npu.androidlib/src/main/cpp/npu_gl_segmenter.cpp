@@ -20,7 +20,14 @@
 #ifndef EGL_NO_SYNC_KHR
 #define EGL_NO_SYNC_KHR ((EGLSyncKHR)0)
 #endif
+#ifndef EGL_NO_CONFIG_KHR
+#define EGL_NO_CONFIG_KHR ((EGLConfig)0)
+#endif
+#ifndef EGL_OPENGL_ES3_BIT
+#define EGL_OPENGL_ES3_BIT 0x00000040
+#endif
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "NpuGl", __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "NpuGl", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "NpuGl", __VA_ARGS__)
 
 #define EXPORT __attribute__((visibility("default")))
@@ -35,6 +42,7 @@ constexpr int kEventUnpack = 3;
 std::mutex g_mu;
 char g_err[512] = "not init";
 std::atomic<bool> g_egl_ready{false};
+std::atomic<bool> g_capturing{false};
 std::atomic<bool> g_loaded{false};
 std::atomic<bool> g_bound{false};
 std::atomic<float> g_run_ms{-1.f};
@@ -81,10 +89,13 @@ void SetErrf(const char* fmt, LiteRtStatus st) {
 }
 
 const char* kPackSrc = R"(#version 310 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
 layout(local_size_x = 8, local_size_y = 8) in;
 uniform sampler2D uRgb;
 uniform int uSize;
-layout(std430, binding = 0) buffer InBuf { float data[]; };
+layout(std430, binding = 0) buffer InBuf { highp float data[]; };
 void main() {
   ivec2 p = ivec2(gl_GlobalInvocationID.xy);
   if (p.x >= uSize || p.y >= uSize) return;
@@ -98,10 +109,13 @@ void main() {
 )";
 
 const char* kUnpackSrc = R"(#version 310 es
+precision highp float;
+precision highp int;
+precision highp image2D;
 layout(local_size_x = 8, local_size_y = 8) in;
 uniform int uSize;
-layout(std430, binding = 0) buffer OutBuf { float data[]; };
-layout(r32f, binding = 1) uniform writeonly image2D uMatte;
+layout(std430, binding = 0) buffer OutBuf { highp float data[]; };
+layout(r32f, binding = 1) uniform highp writeonly image2D uMatte;
 void main() {
   ivec2 p = ivec2(gl_GlobalInvocationID.xy);
   if (p.x >= uSize || p.y >= uSize) return;
@@ -158,45 +172,142 @@ bool LoadEglKhr() {
   return true;
 }
 
+bool HasEglExt(const char* name) {
+  const char* e = eglQueryString(g_dpy, EGL_EXTENSIONS);
+  return e && std::strstr(e, name);
+}
+
+bool FindConfigById(EGLint want, EGLConfig* out) {
+  EGLint n = 0;
+  if (!eglGetConfigs(g_dpy, nullptr, 0, &n) || n < 1) return false;
+  if (n > 256) n = 256;
+  EGLConfig cfgs[256];
+  EGLint got = 0;
+  if (!eglGetConfigs(g_dpy, cfgs, n, &got)) return false;
+  for (EGLint i = 0; i < got; i++) {
+    EGLint id = 0;
+    if (eglGetConfigAttrib(g_dpy, cfgs[i], EGL_CONFIG_ID, &id) && id == want) {
+      *out = cfgs[i];
+      return true;
+    }
+  }
+  return false;
+}
+
+bool FindEs3Config(EGLConfig* out) {
+  EGLint a0[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+                 EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_NONE};
+  EGLint a1[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+                 EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_NONE};
+  EGLint a2[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                 EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_NONE};
+  EGLint* tries[] = {a0, a1, a2};
+  for (EGLint* a : tries) {
+    EGLint n = 0;
+    if (eglChooseConfig(g_dpy, a, out, 1, &n) && n > 0) return true;
+  }
+  EGLint n = 0;
+  return eglGetConfigs(g_dpy, out, 1, &n) && n > 0;
+}
+
+bool TryPbuffer(EGLConfig cfg) {
+  if (!cfg) return false;
+  EGLint st = 0;
+  eglGetConfigAttrib(g_dpy, cfg, EGL_SURFACE_TYPE, &st);
+  if ((st & EGL_PBUFFER_BIT) == 0) return false;
+  EGLint pb[] = {EGL_WIDTH, 8, EGL_HEIGHT, 8, EGL_NONE};
+  g_pbuffer = eglCreatePbufferSurface(g_dpy, cfg, pb);
+  return g_pbuffer != EGL_NO_SURFACE;
+}
+
+void AbandonPartialEgl() {
+  if (g_in_ssbo) { glDeleteBuffers(1, &g_in_ssbo); g_in_ssbo = 0; }
+  if (g_out_ssbo) { glDeleteBuffers(1, &g_out_ssbo); g_out_ssbo = 0; }
+  if (g_pack_prog) { glDeleteProgram(g_pack_prog); g_pack_prog = 0; }
+  if (g_unpack_prog) { glDeleteProgram(g_unpack_prog); g_unpack_prog = 0; }
+  if (g_pbuffer != EGL_NO_SURFACE) {
+    eglDestroySurface(g_dpy, g_pbuffer);
+    g_pbuffer = EGL_NO_SURFACE;
+  }
+  if (g_share != EGL_NO_CONTEXT) {
+    eglDestroyContext(g_dpy, g_share);
+    g_share = EGL_NO_CONTEXT;
+  }
+}
+
 bool CaptureEgl() {
   if (g_egl_ready.load()) return true;
-  if (!LoadEglKhr()) return false;
+  bool expected = false;
+  if (!g_capturing.compare_exchange_strong(expected, true)) return false;
+  struct Unlock {
+    ~Unlock() { g_capturing.store(false); }
+  } unlock;
+
+  if (!LoadEglKhr()) {
+    LOGW("CaptureEgl: %s", g_err);
+    return false;
+  }
 
   g_dpy = eglGetCurrentDisplay();
   g_unity = eglGetCurrentContext();
+  LOGI("CaptureEgl dpy=%p ctx=%p", (void*)g_dpy, (void*)g_unity);
   if (g_dpy == EGL_NO_DISPLAY || g_unity == EGL_NO_CONTEXT) {
-    SetErr("no current EGL display/context");
+    if (!std::strstr(g_err, "compile") && !std::strstr(g_err, "link")) {
+      SetErr("no current EGL display/context");
+      LOGW("%s", g_err);
+    }
     return false;
   }
 
   EGLint cfg_id = 0;
-  if (!eglQueryContext(g_dpy, g_unity, EGL_CONFIG_ID, &cfg_id)) {
-    SetErr("eglQueryContext CONFIG_ID failed");
-    return false;
-  }
-  EGLint attrs[] = {EGL_CONFIG_ID, cfg_id, EGL_NONE};
-  EGLint n = 0;
-  if (!eglChooseConfig(g_dpy, attrs, &g_cfg, 1, &n) || n < 1) {
-    SetErr("eglChooseConfig failed");
+  bool have_id = eglQueryContext(g_dpy, g_unity, EGL_CONFIG_ID, &cfg_id) && cfg_id > 0;
+  LOGI("CaptureEgl cfg_id=%d query_ok=%d", cfg_id, (int)have_id);
+
+  g_cfg = nullptr;
+  if (have_id && !FindConfigById(cfg_id, &g_cfg))
+    LOGW("no EGLConfig with CONFIG_ID %d (eglChooseConfig is skipped; walking eglGetConfigs)",
+         cfg_id);
+  if (!g_cfg && !FindEs3Config(&g_cfg)) {
+    std::snprintf(g_err, sizeof(g_err), "no ES3 EGLConfig 0x%x", eglGetError());
+    LOGE("%s", g_err);
     return false;
   }
 
   EGLint ctx_attr[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-  g_share = eglCreateContext(g_dpy, g_cfg, g_unity, ctx_attr);
+  g_share = EGL_NO_CONTEXT;
+  if (HasEglExt("EGL_KHR_no_config_context"))
+    g_share = eglCreateContext(g_dpy, EGL_NO_CONFIG_KHR, g_unity, ctx_attr);
+  if (g_share == EGL_NO_CONTEXT)
+    g_share = eglCreateContext(g_dpy, g_cfg, g_unity, ctx_attr);
   if (g_share == EGL_NO_CONTEXT) {
-    SetErr("eglCreateContext share failed");
-    return false;
-  }
-  EGLint pb[] = {EGL_WIDTH, 8, EGL_HEIGHT, 8, EGL_NONE};
-  g_pbuffer = eglCreatePbufferSurface(g_dpy, g_cfg, pb);
-  if (g_pbuffer == EGL_NO_SURFACE) {
-    SetErr("eglCreatePbufferSurface failed");
+    std::snprintf(g_err, sizeof(g_err), "eglCreateContext share failed 0x%x", eglGetError());
+    LOGE("%s", g_err);
     return false;
   }
 
+  if (!TryPbuffer(g_cfg)) {
+    EGLConfig pb_cfg = nullptr;
+    EGLint pb_attrs[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+                         EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_NONE};
+    EGLint n = 0;
+    if (eglChooseConfig(g_dpy, pb_attrs, &pb_cfg, 1, &n) && n > 0)
+      TryPbuffer(pb_cfg);
+  }
+  if (g_pbuffer == EGL_NO_SURFACE && !HasEglExt("EGL_KHR_surfaceless_context")) {
+    std::snprintf(g_err, sizeof(g_err), "no pbuffer and no surfaceless 0x%x", eglGetError());
+    LOGE("%s", g_err);
+    AbandonPartialEgl();
+    return false;
+  }
+  LOGI("share ctx=%p pbuffer=%p surfaceless=%d", (void*)g_share, (void*)g_pbuffer,
+       (int)(g_pbuffer == EGL_NO_SURFACE));
+
   g_pack_prog = CompileCompute(kPackSrc, "pack");
   g_unpack_prog = CompileCompute(kUnpackSrc, "unpack");
-  if (!g_pack_prog || !g_unpack_prog) return false;
+  if (!g_pack_prog || !g_unpack_prog) {
+    AbandonPartialEgl();
+    return false;
+  }
 
   auto make_ssbo = [](GLsizeiptr bytes) {
     GLuint b = 0;
@@ -213,6 +324,7 @@ bool CaptureEgl() {
   if (err != GL_NO_ERROR) {
     std::snprintf(g_err, sizeof(g_err), "ssbo glGetError 0x%x", err);
     LOGE("%s", g_err);
+    AbandonPartialEgl();
     return false;
   }
 
@@ -264,7 +376,8 @@ bool WorkerMakeCurrent() {
     SetErr("EGL not captured yet");
     return false;
   }
-  if (!eglMakeCurrent(g_dpy, g_pbuffer, g_pbuffer, g_share)) {
+  EGLSurface surf = g_pbuffer != EGL_NO_SURFACE ? g_pbuffer : EGL_NO_SURFACE;
+  if (!eglMakeCurrent(g_dpy, surf, surf, g_share)) {
     std::snprintf(g_err, sizeof(g_err), "worker eglMakeCurrent 0x%x", eglGetError());
     LOGE("%s", g_err);
     return false;
@@ -284,14 +397,37 @@ LiteRtRankedTensorType MakeType(int c, int h, int w) {
   return t;
 }
 
-bool LoadModel(const char* path, const char* lib_dir) {
-  if (g_loaded.load()) return true;
-  if (!WorkerMakeCurrent()) return false;
+void CloseLiteRtUnlocked() {
+  if (g_in_tb) {
+    LiteRtDestroyTensorBuffer(g_in_tb);
+    g_in_tb = nullptr;
+  }
+  if (g_out_tb) {
+    LiteRtDestroyTensorBuffer(g_out_tb);
+    g_out_tb = nullptr;
+  }
+  if (g_compiled) {
+    LiteRtDestroyCompiledModel(g_compiled);
+    g_compiled = nullptr;
+  }
+  if (g_opts) {
+    LiteRtDestroyOptions(g_opts);
+    g_opts = nullptr;
+  }
+  if (g_model) {
+    LiteRtDestroyModel(g_model);
+    g_model = nullptr;
+  }
+  if (g_env) {
+    LiteRtDestroyEnvironment(g_env);
+    g_env = nullptr;
+  }
+  g_loaded.store(false);
+  g_bound.store(false);
+}
 
-  g_model_path = path ? path : "";
-  g_lib_dir = lib_dir ? lib_dir : "";
-
-  LiteRtEnvOption opts[3];
+bool CreateLiteRtEnv(bool with_egl) {
+  LiteRtEnvOption opts[4];
   int nopt = 0;
   if (!g_lib_dir.empty()) {
     opts[nopt].tag = kLiteRtEnvOptionTagDispatchLibraryDir;
@@ -299,21 +435,26 @@ bool LoadModel(const char* path, const char* lib_dir) {
     opts[nopt].value.str_value = g_lib_dir.c_str();
     nopt++;
   }
-  opts[nopt].tag = kLiteRtEnvOptionTagEglDisplay;
-  opts[nopt].value.type = kLiteRtAnyTypeVoidPtr;
-  opts[nopt].value.ptr_value = g_dpy;
-  nopt++;
-  opts[nopt].tag = kLiteRtEnvOptionTagEglContext;
-  opts[nopt].value.type = kLiteRtAnyTypeVoidPtr;
-  opts[nopt].value.ptr_value = g_share;
-  nopt++;
-
+  if (with_egl) {
+    opts[nopt].tag = kLiteRtEnvOptionTagEglDisplay;
+    opts[nopt].value.type = kLiteRtAnyTypeVoidPtr;
+    opts[nopt].value.ptr_value = g_dpy;
+    nopt++;
+    opts[nopt].tag = kLiteRtEnvOptionTagEglContext;
+    opts[nopt].value.type = kLiteRtAnyTypeVoidPtr;
+    opts[nopt].value.ptr_value = g_share;
+    nopt++;
+  }
   LiteRtStatus st = LiteRtCreateEnvironment(nopt, opts, &g_env);
   if (st != kLiteRtStatusOk) {
-    SetErrf("LiteRtCreateEnvironment", st);
+    SetErrf(with_egl ? "LiteRtCreateEnvironment egl" : "LiteRtCreateEnvironment", st);
     return false;
   }
-  st = LiteRtCreateModelFromFile(g_model_path.c_str(), &g_model);
+  return true;
+}
+
+bool CompileGpu() {
+  LiteRtStatus st = LiteRtCreateModelFromFile(g_model_path.c_str(), &g_model);
   if (st != kLiteRtStatusOk) {
     SetErrf("LiteRtCreateModelFromFile", st);
     return false;
@@ -333,22 +474,52 @@ bool LoadModel(const char* path, const char* lib_dir) {
     SetErrf("LiteRtCreateCompiledModel GPU", st);
     return false;
   }
+  return true;
+}
+
+bool LoadModel(const char* path, const char* lib_dir) {
+  if (g_loaded.load()) return true;
+
+  g_model_path = path ? path : "";
+  g_lib_dir = lib_dir ? lib_dir : "";
+
+  // Do not eglMakeCurrent first. Java CompiledModel.create compiles OpenCL with no
+  // GLES current; doing both on this thread is the S24 hang, and with EGL env
+  // options it returned RuntimeFailure (status 3) in ~3 ms on device.
+  bool with_egl = true;
+  if (!CreateLiteRtEnv(true) || !CompileGpu()) {
+    LOGW("GPU compile with EGL env failed (%s), retry without", g_err);
+    CloseLiteRtUnlocked();
+    with_egl = false;
+    if (!CreateLiteRtEnv(false) || !CompileGpu()) {
+      CloseLiteRtUnlocked();
+      return false;
+    }
+  }
+  LOGI("CompiledModel GPU ok egl_env=%d", (int)with_egl);
+
+  if (!WorkerMakeCurrent()) {
+    CloseLiteRtUnlocked();
+    return false;
+  }
 
   const int sz = g_size.load();
   auto in_ty = MakeType(3, sz, sz);
   auto out_ty = MakeType(1, sz, sz);
   size_t in_bytes = (size_t)3 * sz * sz * sizeof(float);
   size_t out_bytes = (size_t)sz * sz * sizeof(float);
-  st = LiteRtCreateTensorBufferFromGlBuffer(g_env, &in_ty, kSsbo, g_in_ssbo, in_bytes, 0,
-                                            nullptr, &g_in_tb);
+  LiteRtStatus st = LiteRtCreateTensorBufferFromGlBuffer(
+      g_env, &in_ty, kSsbo, g_in_ssbo, in_bytes, 0, nullptr, &g_in_tb);
   if (st != kLiteRtStatusOk) {
     SetErrf("CreateFromGlBuffer input", st);
+    CloseLiteRtUnlocked();
     return false;
   }
   st = LiteRtCreateTensorBufferFromGlBuffer(g_env, &out_ty, kSsbo, g_out_ssbo, out_bytes, 0,
                                             nullptr, &g_out_tb);
   if (st != kLiteRtStatusOk) {
     SetErrf("CreateFromGlBuffer output", st);
+    CloseLiteRtUnlocked();
     return false;
   }
 
@@ -395,32 +566,7 @@ bool Run() {
 
 void CloseNative() {
   std::lock_guard<std::mutex> lock(g_mu);
-  if (g_in_tb) {
-    LiteRtDestroyTensorBuffer(g_in_tb);
-    g_in_tb = nullptr;
-  }
-  if (g_out_tb) {
-    LiteRtDestroyTensorBuffer(g_out_tb);
-    g_out_tb = nullptr;
-  }
-  if (g_compiled) {
-    LiteRtDestroyCompiledModel(g_compiled);
-    g_compiled = nullptr;
-  }
-  if (g_opts) {
-    LiteRtDestroyOptions(g_opts);
-    g_opts = nullptr;
-  }
-  if (g_model) {
-    LiteRtDestroyModel(g_model);
-    g_model = nullptr;
-  }
-  if (g_env) {
-    LiteRtDestroyEnvironment(g_env);
-    g_env = nullptr;
-  }
-  g_loaded.store(false);
-  g_bound.store(false);
+  CloseLiteRtUnlocked();
 }
 
 } // namespace
@@ -431,6 +577,8 @@ EXPORT void npu_gl_on_render_event(int event_id) {
   // Never take g_mu here: the worker holds it across CompiledModel.create
   // (seconds) and that is the S24 render-thread hang.
   if (event_id == kEventCapture) {
+    LOGI("capture event ctx=%p ready=%d", (void*)eglGetCurrentContext(),
+         (int)g_egl_ready.load());
     CaptureEgl();
     return;
   }
@@ -444,6 +592,11 @@ EXPORT void* npu_gl_event_fn() { return (void*)npu_gl_on_render_event; }
 JNIEXPORT jboolean JNICALL
 Java_com_pavel_arbuildings_NpuSegmenter_nativeGlEglReady(JNIEnv*, jobject) {
   return g_egl_ready.load() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_pavel_arbuildings_NpuSegmenter_nativeGlCapture(JNIEnv*, jobject) {
+  return CaptureEgl() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL

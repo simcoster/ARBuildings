@@ -159,15 +159,16 @@ public class SemanticOcclusion : MonoBehaviour
     bool _gpuInputFailed;
     bool _gpuDisplaySpace;
     bool _glFailed;
-    bool _eglCaptured;
     bool _glAwaitSubmit;
     int _glPackFrame = -1;
+    int _eglWaitFrames;
     Material _disBlitMat;
     Material _maskPackMat;
     RenderTexture _inferFloatRT;
     RenderTexture _matteRT;
     RenderTexture _maskRT;
     static IntPtr _glEventFn;
+    static bool _glEventFnMissingLogged;
     string _convertNote = "n/a";
     float _inferTimer;
     int _frameSkip;
@@ -295,6 +296,7 @@ public class SemanticOcclusion : MonoBehaviour
         _glFailed = false;
         _wantGpuCapture = false;
         _glAwaitSubmit = false;
+        _eglWaitFrames = 0;
         _maskW = _maskH = 0;
         return gpuCameraInput
             ? (UseGlPath()
@@ -778,6 +780,11 @@ public class SemanticOcclusion : MonoBehaviour
                              : UseGlPath() ? "gl-zero-copy"
                              : "gpu blit + async readback") +
                          (gpuBlitFlipY ? ", flipY" : ""));
+            r.AppendLine($"seg egl            : " +
+                         (_npu.EglReady ? "share context ready"
+                             : UseGlPath() && !IsBench
+                                 ? $"waiting ({_eglWaitFrames} frames) {_npu.LastError}"
+                                 : "n/a"));
             r.AppendLine($"seg camera image   : last {_camW}x{_camH}, gpu tex {_gpuW}x{_gpuH} " +
                          (centreCrop ? "-> centred square, no squash"
                                      : $"-> whole frame squashed x{HorizontalSquash:F2} horizontally"));
@@ -850,12 +857,20 @@ public class SemanticOcclusion : MonoBehaviour
         ApplyMaterialFlags();
         if (_camera != null)
             _camera.frameReceived += OnCameraFrame;
+        RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
         // Do not LoadModel here. DIS-ISNet is 176 MB; GpuDelegate OpenCL compile of it
         // hung the S24 (black screen, no HUD, system UI crawling). Tap seg to load.
     }
 
+    void OnBeginCameraRendering(ScriptableRenderContext ctx, Camera cam)
+    {
+        if (IsBench || _npu.EglReady || !_npu.GlPathReady) return;
+        IssueGlEvent(GlEventCapture);
+    }
+
     void OnDestroy()
     {
+        RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
         if (_camera != null)
             _camera.frameReceived -= OnCameraFrame;
         _wantGpuCapture = false;
@@ -1092,12 +1107,16 @@ public class SemanticOcclusion : MonoBehaviour
         _stageI = 0;
         _maskPeriodMs = -1f;
         _lastMaskAt = -1f;
+        _eglWaitFrames = 0;
+        _glAwaitSubmit = false;
         if (_unloadAfterBind || !enableOnStart)
         {
             _unloadAfterBind = false;
             StartCoroutine(UnloadModel());
             return;
         }
+        if (_npu.GlPathReady && !IsBench)
+            StartCoroutine(PumpEglCapture());
         ArmHoldTimer();
         if (enableOnStart && _npu.Ready) SubmitFrame();
     }
@@ -1315,7 +1334,14 @@ public class SemanticOcclusion : MonoBehaviour
     static void IssueGlEvent(int id)
     {
         var fn = GlEventFn();
-        if (fn != IntPtr.Zero) GL.IssuePluginEvent(fn, id);
+        if (fn != IntPtr.Zero)
+        {
+            GL.IssuePluginEvent(fn, id);
+            return;
+        }
+        if (_glEventFnMissingLogged) return;
+        _glEventFnMissingLogged = true;
+        Debug.LogWarning("[Seg] npu_gl_event_fn missing — libnpu_gl.so not loaded");
     }
 #else
     static void IssueGlEvent(int id) { }
@@ -1577,10 +1603,12 @@ public class SemanticOcclusion : MonoBehaviour
         _stageLast[SWaitCam] = MsSince(_tWant);
         _tFrame = Now();
 
-        if (!_eglCaptured)
+        if (!IsBench && !_npu.EglReady)
         {
             IssueGlEvent(GlEventCapture);
-            _eglCaptured = true;
+            _eglWaitFrames++;
+            _convertNote = $"gl waiting for EGL share ({_eglWaitFrames} frames)";
+            return true;
         }
 
         SquareCropScaleOffset(src.width, src.height, centreCrop, gpuBlitFlipY,
@@ -1653,13 +1681,28 @@ public class SemanticOcclusion : MonoBehaviour
     void TrySubmitGl()
     {
         if (!_glAwaitSubmit || _npu.Busy) return;
+        if (!_npu.EglReady)
+        {
+            IssueGlEvent(GlEventCapture);
+            return;
+        }
         if (Time.frameCount <= _glPackFrame) return;
         _glAwaitSubmit = false;
         float tSub = Now();
-        if (!_npu.SubmitGl() && !string.IsNullOrEmpty(_npu.LastError))
+        if (!_npu.SubmitGl())
         {
-            _loadNote = $"submitGl failed: {_npu.LastError}";
-            FailGl(_npu.LastError);
+            string e = _npu.LastError ?? "";
+            if (e.IndexOf("EGL not captured", System.StringComparison.Ordinal) >= 0)
+            {
+                _glAwaitSubmit = true;
+                IssueGlEvent(GlEventCapture);
+                return;
+            }
+            if (!string.IsNullOrEmpty(e))
+            {
+                _loadNote = $"submitGl failed: {e}";
+                FailGl(e);
+            }
         }
         _stageLast[SSubmit] = MsSince(tSub);
         _stageLast[SCopy] = _stageLast[SUnpack] = 0f;
@@ -1692,6 +1735,10 @@ public class SemanticOcclusion : MonoBehaviour
         if (_glFailed || !_npu.GlPathReady || _npu.Busy || _glAwaitSubmit) return;
         string e = _npu.LastError;
         if (string.IsNullOrEmpty(e)) return;
+        if (e.IndexOf("EGL not captured", System.StringComparison.Ordinal) >= 0)
+            return;
+        if (e.IndexOf("no current EGL", System.StringComparison.Ordinal) >= 0)
+            return;
         if (e.IndexOf("REJECT gl", System.StringComparison.Ordinal) >= 0
             || e.IndexOf("CreateFromGl", System.StringComparison.Ordinal) >= 0
             || e.IndexOf("LiteRt", System.StringComparison.Ordinal) >= 0
@@ -1699,6 +1746,34 @@ public class SemanticOcclusion : MonoBehaviour
             || e.StartsWith("gl run", System.StringComparison.Ordinal)
             || e.StartsWith("gl path", System.StringComparison.Ordinal))
             FailGl(e);
+    }
+
+    IEnumerator PumpEglCapture()
+    {
+        int n = 0;
+        while (_npu.GlPathReady && !_npu.EglReady && n < 90 && !_glFailed)
+        {
+            IssueGlEvent(GlEventCapture);
+            yield return new WaitForEndOfFrame();
+            if (_npu.TryCaptureEgl())
+                break;
+            string err = _npu.LastError ?? "";
+            if (err.IndexOf("compile", System.StringComparison.Ordinal) >= 0
+                || err.IndexOf("link", System.StringComparison.Ordinal) >= 0)
+            {
+                FailGl(err);
+                yield break;
+            }
+            n++;
+            _eglWaitFrames = n;
+        }
+        if (_npu.EglReady)
+        {
+            _eglWaitFrames = 0;
+            Debug.Log("[Seg] EGL share context ready");
+        }
+        else if (!_glFailed && _npu.GlPathReady)
+            FailGl("EGL not captured after 90 frames — " + _npu.LastError);
     }
 
     void FailGl(string why)

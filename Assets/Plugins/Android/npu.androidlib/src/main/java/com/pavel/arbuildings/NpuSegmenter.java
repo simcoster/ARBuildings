@@ -38,6 +38,7 @@ public final class NpuSegmenter {
     }
 
     private native boolean nativeGlEglReady();
+    private native boolean nativeGlCapture();
     private native boolean nativeGlLoaded();
     private native String nativeGlError();
     private native float nativeGlRunMs();
@@ -491,6 +492,17 @@ public final class NpuSegmenter {
         return nativeLoaded && nativeGlEglReady();
     }
 
+    /** Call on a thread that has Unity's GLES context current (plugin event or end-of-frame). */
+    public boolean captureEglNow() {
+        if (!nativeLoaded) return false;
+        if (nativeGlCapture()) {
+            lastError = "";
+            return true;
+        }
+        lastError = nativeGlError();
+        return false;
+    }
+
     /**
      * Zero-copy GPU path for DIS: worker waits the Unity blit fence, CompiledModel::Run
      * on GL SSBOs, then an output fence. No writeFloat / readFloat.
@@ -505,6 +517,10 @@ public final class NpuSegmenter {
     public boolean submitGl() {
         if (!glPath || !nativeLoaded) {
             lastError = "gl path off";
+            return false;
+        }
+        if (!nativeGlEglReady()) {
+            lastError = "EGL not captured yet";
             return false;
         }
         synchronized (lock) {
@@ -544,7 +560,9 @@ public final class NpuSegmenter {
                 long tLoad = System.nanoTime();
                 if (!nativeGlLoad(compiledPath, nativeLibDir())) {
                     lastError = nativeGlError();
-                    ep = "REJECT gl";
+                    // Waiting for Unity's render thread to capture EGL is not a reject.
+                    if (lastError == null || !lastError.contains("EGL not captured"))
+                        ep = "REJECT gl";
                     return false;
                 }
                 float compileMs = (System.nanoTime() - tLoad) / 1e6f;

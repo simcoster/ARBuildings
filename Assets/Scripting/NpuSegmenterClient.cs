@@ -266,8 +266,24 @@ public sealed class NpuSegmenterClient : IDisposable
     {
         get
         {
-            if (!Ready || _java == null) return false;
+            if (_java == null) return false;
             try { return _java.Call<bool>("eglReady"); } catch { return false; }
+        }
+    }
+
+    public bool TryCaptureEgl()
+    {
+        if (_java == null) return false;
+        try
+        {
+            bool ok = _java.Call<bool>("captureEglNow");
+            LastError = _java.Call<string>("lastError") ?? "";
+            return ok;
+        }
+        catch (Exception e)
+        {
+            LastError = $"captureEgl: {e.Message}";
+            return false;
         }
     }
 
@@ -280,7 +296,12 @@ public sealed class NpuSegmenterClient : IDisposable
     public bool SubmitGl()
     {
         if (!Ready || !GlPathReady) return false;
-        try { return _java.Call<bool>("submitGl"); }
+        try
+        {
+            bool ok = _java.Call<bool>("submitGl");
+            LastError = _java.Call<string>("lastError") ?? "";
+            return ok;
+        }
         catch (Exception e)
         {
             LastError = $"submitGl: {e.Message}";
@@ -308,6 +329,7 @@ public sealed class NpuSegmenterClient : IDisposable
     void TryEnableGlPath() { GlPathReady = false; }
     public static bool NativeGlAvailable() => false;
     public bool EglReady => false;
+    public bool TryCaptureEgl() => false;
     public void SetGlTextures(int rgbTex, int matteTex, int size) { }
     public bool SubmitGl() => false;
     public bool PollGl() => false;
