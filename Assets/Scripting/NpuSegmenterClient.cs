@@ -31,6 +31,7 @@ public sealed class NpuSegmenterClient : IDisposable
     public bool ScalarOutput { get; private set; }
     public string OutputKind { get; private set; } = "n/a";
     public string ScalarRange { get; private set; } = "n/a";
+    public bool GlPathReady { get; private set; }
 
 #if UNITY_ANDROID && !UNITY_EDITOR
     AndroidJavaObject _java;
@@ -135,6 +136,7 @@ public sealed class NpuSegmenterClient : IDisposable
         ScalarOutput = _java.Call<bool>("scalarOutput");
         OutputKind = _java.Call<string>("outputKind") ?? "n/a";
         Ready = true;
+        TryEnableGlPath();
         return true;
 #else
         return false;
@@ -234,6 +236,83 @@ public sealed class NpuSegmenterClient : IDisposable
         }
     }
 
+#if UNITY_ANDROID && !UNITY_EDITOR
+    void TryEnableGlPath()
+    {
+        GlPathReady = false;
+        if (_java == null) return;
+        try
+        {
+            GlPathReady = _java.Call<bool>("enableGlPath");
+        }
+        catch (Exception e)
+        {
+            LastError = $"gl enable: {e.Message}";
+            GlPathReady = false;
+        }
+    }
+
+    public static bool NativeGlAvailable()
+    {
+        try
+        {
+            using var cls = new AndroidJavaClass("com.pavel.arbuildings.NpuSegmenter");
+            return cls.CallStatic<bool>("nativeGlAvailable");
+        }
+        catch { return false; }
+    }
+
+    public bool EglReady
+    {
+        get
+        {
+            if (!Ready || _java == null) return false;
+            try { return _java.Call<bool>("eglReady"); } catch { return false; }
+        }
+    }
+
+    public void SetGlTextures(int rgbTex, int matteTex, int size)
+    {
+        if (_java == null) return;
+        try { _java.Call("setGlTextures", rgbTex, matteTex, size); } catch { /* optional */ }
+    }
+
+    public bool SubmitGl()
+    {
+        if (!Ready || !GlPathReady) return false;
+        try { return _java.Call<bool>("submitGl"); }
+        catch (Exception e)
+        {
+            LastError = $"submitGl: {e.Message}";
+            return false;
+        }
+    }
+
+    public bool PollGl()
+    {
+        if (!Ready || !GlPathReady) return false;
+        try
+        {
+            bool ok = _java.Call<bool>("pollGl");
+            if (ok) PullStageTimes();
+            LastError = _java.Call<string>("lastError") ?? "";
+            return ok;
+        }
+        catch (Exception e)
+        {
+            LastError = $"pollGl: {e.Message}";
+            return false;
+        }
+    }
+#else
+    void TryEnableGlPath() { GlPathReady = false; }
+    public static bool NativeGlAvailable() => false;
+    public bool EglReady => false;
+    public void SetGlTextures(int rgbTex, int matteTex, int size) { }
+    public bool SubmitGl() => false;
+    public bool PollGl() => false;
+#endif
+
     /// <summary>
     /// Synchronous inference; kept for one-shot diagnostics. Returns the label map, or
     /// null on failure. It has to be a return value: Unity's JNI copies a managed array
@@ -310,6 +389,7 @@ public sealed class NpuSegmenterClient : IDisposable
     public void Dispose()
     {
         Ready = false;
+        GlPathReady = false;
 #if UNITY_ANDROID && !UNITY_EDITOR
         if (_java != null)
         {

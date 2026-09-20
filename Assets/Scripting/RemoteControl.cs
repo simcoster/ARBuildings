@@ -323,7 +323,9 @@ public class RemoteControl : MonoBehaviour
                 if (seg == null) return "no semantic occlusion";
                 if (arg.Length == 0)
                     return seg.GpuCameraInput
-                        ? "segcam gpu — blit ARCore camera texture, async readback"
+                        ? (seg.UseGlCameraPath
+                            ? "segcam gpu — gl-zero-copy"
+                            : "segcam gpu — blit ARCore camera texture, async readback")
                         : "segcam cpu — XRCpuImage";
                 {
                     string cam = arg.ToLowerInvariant();

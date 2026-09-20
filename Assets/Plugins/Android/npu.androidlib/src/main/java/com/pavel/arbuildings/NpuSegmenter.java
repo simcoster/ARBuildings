@@ -24,6 +24,30 @@ import java.util.Locale;
  *   npu    — same as gpu; ENN NNAPI is gone with classic tensorflow-lite
  */
 public final class NpuSegmenter {
+    private static final boolean nativeLoaded;
+    static {
+        boolean ok = false;
+        try {
+            System.loadLibrary("LiteRt");
+            System.loadLibrary("npu_gl");
+            ok = true;
+        } catch (UnsatisfiedLinkError e) {
+            android.util.Log.w("NpuGl", "npu_gl not loaded: " + e.getMessage());
+        }
+        nativeLoaded = ok;
+    }
+
+    private native boolean nativeGlEglReady();
+    private native boolean nativeGlLoaded();
+    private native String nativeGlError();
+    private native float nativeGlRunMs();
+    private native void nativeGlSetTextures(int rgb, int matte, int size);
+    private native boolean nativeGlLoad(String path, String libDir);
+    private native boolean nativeGlRun();
+    private native void nativeGlClose();
+
+    public static boolean nativeGlAvailable() { return nativeLoaded; }
+
     private Interpreter interpreter;
     private CompiledModel compiled;
     private List<TensorBuffer> compiledInBufs;
@@ -58,6 +82,9 @@ public final class NpuSegmenter {
     private volatile boolean running;
     private byte[] pending;
     private boolean hasPending;
+    private boolean hasGlPending;
+    private boolean glFrameDone;
+    private boolean glPath;
     private byte[] readyLabels;
     private boolean inFlight;
 
@@ -80,6 +107,8 @@ public final class NpuSegmenter {
     public int outputHeight() { return outH; }
     public int outputChannels() { return outC; }
     public boolean ready() { return interpreter != null || compiled != null || compiledPath != null || canny || bench; }
+
+    public boolean glPathReady() { return glPath && nativeLoaded; }
 
     // No TFLite. Same worker, same RGB in / byte-map out as a matte. 480 is the largest
     // square the A35 camera CPU image (640x480) can feed without upscaling.
@@ -453,6 +482,93 @@ public final class NpuSegmenter {
         return true;
     }
 
+    public void setGlTextures(int rgbTex, int matteTex, int size) {
+        if (!nativeLoaded) return;
+        nativeGlSetTextures(rgbTex, matteTex, size);
+    }
+
+    public boolean eglReady() {
+        return nativeLoaded && nativeGlEglReady();
+    }
+
+    /**
+     * Zero-copy GPU path for DIS: worker waits the Unity blit fence, CompiledModel::Run
+     * on GL SSBOs, then an output fence. No writeFloat / readFloat.
+     */
+    public boolean enableGlPath() {
+        if (!nativeLoaded) return false;
+        if (canny || bench || compiledPath == null) return false;
+        glPath = true;
+        return true;
+    }
+
+    public boolean submitGl() {
+        if (!glPath || !nativeLoaded) {
+            lastError = "gl path off";
+            return false;
+        }
+        synchronized (lock) {
+            if (inFlight) return false;
+            hasGlPending = true;
+            inFlight = true;
+            startWorker();
+            lock.notifyAll();
+        }
+        return true;
+    }
+
+    /** True once the worker finished a GL run (output fence is posted). Clears on read. */
+    public boolean pollGl() {
+        synchronized (lock) {
+            if (!glFrameDone) return false;
+            glFrameDone = false;
+            return true;
+        }
+    }
+
+    private String nativeLibDir() {
+        try {
+            Class<?> up = Class.forName("com.unity3d.player.UnityPlayer");
+            Object act = up.getField("currentActivity").get(null);
+            Object info = act.getClass().getMethod("getApplicationInfo").invoke(act);
+            Object dir = info.getClass().getField("nativeLibraryDir").get(info);
+            return dir == null ? "" : dir.toString();
+        } catch (Throwable e) {
+            return "";
+        }
+    }
+
+    private boolean runGl() {
+        try {
+            if (!nativeGlLoaded()) {
+                long tLoad = System.nanoTime();
+                if (!nativeGlLoad(compiledPath, nativeLibDir())) {
+                    lastError = nativeGlError();
+                    ep = "REJECT gl";
+                    return false;
+                }
+                float compileMs = (System.nanoTime() - tLoad) / 1e6f;
+                ep = String.format(Locale.US, "litert-gl compile %.0fms", compileMs);
+            }
+            fillMs = 0f;
+            decodeMs = 0f;
+            if (!nativeGlRun()) {
+                lastError = nativeGlError();
+                return false;
+            }
+            runMs = nativeGlRunMs();
+            lastMs = runMs;
+            lastError = "";
+            lastMin = 0f;
+            lastMax = 1f;
+            lastScalarMode = "alpha (gl)";
+            return true;
+        } catch (Throwable e) {
+            lastError = "gl run " + e.getClass().getSimpleName() + ": " + e.getMessage();
+            return false;
+        }
+    }
+
     /** The newest finished label map, or null if none is waiting. Clears on read. */
     public byte[] pollLabels() {
         synchronized (lock) {
@@ -479,8 +595,9 @@ public final class NpuSegmenter {
     private void loop() {
         while (true) {
             byte[] job;
+            boolean gl;
             synchronized (lock) {
-                while (running && !hasPending) {
+                while (running && !hasPending && !hasGlPending) {
                     try {
                         lock.wait(200);
                     } catch (InterruptedException e) {
@@ -488,14 +605,20 @@ public final class NpuSegmenter {
                     }
                 }
                 if (!running) return;
-                job = pending;
-                hasPending = false;
+                gl = hasGlPending;
+                hasGlPending = false;
+                job = gl ? null : pending;
+                if (!gl) hasPending = false;
             }
 
-            byte[] result = runOnce(job);
+            byte[] result = null;
+            boolean glOk = false;
+            if (gl) glOk = runGl();
+            else result = runOnce(job);
 
             synchronized (lock) {
                 readyLabels = result;
+                glFrameDone = gl && glOk;
                 inFlight = false;
             }
         }
@@ -865,6 +988,9 @@ public final class NpuSegmenter {
         synchronized (lock) {
             running = false;
             hasPending = false;
+            hasGlPending = false;
+            glFrameDone = false;
+            glPath = false;
             inFlight = false;
             readyLabels = null;
             w = worker;
@@ -902,6 +1028,9 @@ public final class NpuSegmenter {
         }
         compiledIn = null;
         compiledPath = null;
+        if (nativeLoaded) {
+            try { nativeGlClose(); } catch (Throwable ignored) { }
+        }
         inBuf = null;
         outBuf = null;
         pending = null;

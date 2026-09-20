@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using Unity.Collections;
@@ -157,6 +158,16 @@ public class SemanticOcclusion : MonoBehaviour
     bool _wantGpuCapture;
     bool _gpuInputFailed;
     bool _gpuDisplaySpace;
+    bool _glFailed;
+    bool _eglCaptured;
+    bool _glAwaitSubmit;
+    int _glPackFrame = -1;
+    Material _disBlitMat;
+    Material _maskPackMat;
+    RenderTexture _inferFloatRT;
+    RenderTexture _matteRT;
+    RenderTexture _maskRT;
+    static IntPtr _glEventFn;
     string _convertNote = "n/a";
     float _inferTimer;
     int _frameSkip;
@@ -192,6 +203,13 @@ public class SemanticOcclusion : MonoBehaviour
     static readonly int IdMax = Shader.PropertyToID("_MaxOcclusionDistance");
     static readonly int IdSeg = Shader.PropertyToID("_SegEnabled");
     static readonly int IdDbg = Shader.PropertyToID("_SegDebug");
+    static readonly int IdDisplay = Shader.PropertyToID("_UnityDisplayTransform");
+    const int GlEventCapture = 1, GlEventPack = 2, GlEventUnpack = 3;
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+    [DllImport("npu_gl")]
+    static extern IntPtr npu_gl_event_fn();
+#endif
 
     public bool Enabled
     {
@@ -268,15 +286,20 @@ public class SemanticOcclusion : MonoBehaviour
     }
 
     public bool GpuCameraInput => gpuCameraInput && !_gpuInputFailed;
+    public bool UseGlCameraPath => UseGlPath();
 
     public string SetGpuCameraInput(bool on)
     {
         gpuCameraInput = on;
         _gpuInputFailed = false;
+        _glFailed = false;
         _wantGpuCapture = false;
+        _glAwaitSubmit = false;
         _maskW = _maskH = 0;
         return gpuCameraInput
-            ? "segcam gpu — blit ARCore camera texture, async readback"
+            ? (UseGlPath()
+                ? "segcam gpu — gl-zero-copy"
+                : "segcam gpu — blit ARCore camera texture, async readback")
             : "segcam cpu — XRCpuImage";
     }
 
@@ -750,7 +773,9 @@ public class SemanticOcclusion : MonoBehaviour
             r.AppendLine($"seg camera source  : " +
                          (!gpuCameraInput ? "cpu XRCpuImage"
                              : _gpuInputFailed ? "gpu FAILED, cpu fallback"
+                             : _glFailed ? "gl FAILED, gpu-blit readback"
                              : IsCanny ? "cpu (canny)"
+                             : UseGlPath() ? "gl-zero-copy"
                              : "gpu blit + async readback") +
                          (gpuBlitFlipY ? ", flipY" : ""));
             r.AppendLine($"seg camera image   : last {_camW}x{_camH}, gpu tex {_gpuW}x{_gpuH} " +
@@ -810,6 +835,12 @@ public class SemanticOcclusion : MonoBehaviour
         }
 
         _mat = Instantiate(src);
+        var dis = Resources.Load<Shader>("SegDisBlit");
+        var pack = Resources.Load<Shader>("SegMaskPack");
+        if (dis != null) _disBlitMat = new Material(dis);
+        if (pack != null) _maskPackMat = new Material(pack);
+        if (_disBlitMat == null || _maskPackMat == null)
+            Debug.LogWarning("[Seg] SegDisBlit/SegMaskPack missing from Resources — GL path off");
         if (_background != null)
         {
             _background.customMaterial = _mat;
@@ -830,9 +861,12 @@ public class SemanticOcclusion : MonoBehaviour
         _wantGpuCapture = false;
         _gpuReadbackPending = false;
         ReleaseInferRT();
+        ReleaseGlRTs();
         _npu.Dispose();
         if (_maskTex != null) Destroy(_maskTex);
         if (_mat != null) Destroy(_mat);
+        if (_disBlitMat != null) Destroy(_disBlitMat);
+        if (_maskPackMat != null) Destroy(_maskPackMat);
     }
 
     void Update()
@@ -853,14 +887,17 @@ public class SemanticOcclusion : MonoBehaviour
 
         if (!enableOnStart || !_npu.Ready || _reloading) return;
 
+        CollectGlResult();
         CollectResult();
         TryFinishGpuReadback();
+        TrySubmitGl();
+        WatchGlFailure();
 
         _frameSkip++;
         if (_frameSkip < inferEveryNFrames) return;
         _inferTimer += Time.deltaTime;
         if (_inferTimer < inferIntervalSeconds) return;
-        if (_npu.Busy || _gpuReadbackPending || _wantGpuCapture) return;
+        if (_npu.Busy || _gpuReadbackPending || _wantGpuCapture || _glAwaitSubmit) return;
         _frameSkip = 0;
         _inferTimer = 0f;
         SubmitFrame();
@@ -1046,6 +1083,8 @@ public class SemanticOcclusion : MonoBehaviour
         Allocate(_npu.OutputWidth, _npu.OutputHeight);
         ConfigureThingTable(_npu.OutputChannels);
         _loadNote = note;
+        if (_npu.GlPathReady)
+            _loadNote += " gl-zero-copy";
         Debug.Log($"[Seg] loaded: {_loadNote}");
         ApplyMaterialFlags();
         _reloading = false;
@@ -1247,10 +1286,40 @@ public class SemanticOcclusion : MonoBehaviour
             && !IsCanny
             && _npu.Ready
             && _gpuCamTex != null
-            && SystemInfo.supportsAsyncGPUReadback
             && _npu.InputWidth > 0
-            && _npu.InputHeight > 0;
+            && _npu.InputHeight > 0
+            && (UseGlPath() || SystemInfo.supportsAsyncGPUReadback);
     }
+
+    bool UseGlPath()
+    {
+        if (_glFailed || !gpuCameraInput || _gpuInputFailed) return false;
+        if (IsCanny) return false;
+        if (_disBlitMat == null || _maskPackMat == null) return false;
+        if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.OpenGLES3) return false;
+        if (IsBench) return true;
+        return _npu.GlPathReady;
+    }
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+    static IntPtr GlEventFn()
+    {
+        if (_glEventFn == IntPtr.Zero)
+        {
+            try { _glEventFn = npu_gl_event_fn(); }
+            catch { _glEventFn = IntPtr.Zero; }
+        }
+        return _glEventFn;
+    }
+
+    static void IssueGlEvent(int id)
+    {
+        var fn = GlEventFn();
+        if (fn != IntPtr.Zero) GL.IssuePluginEvent(fn, id);
+    }
+#else
+    static void IssueGlEvent(int id) { }
+#endif
 
     /// <summary>
     /// Grabs a camera frame and queues it. Returns without blocking, so frame time no
@@ -1357,6 +1426,10 @@ public class SemanticOcclusion : MonoBehaviour
         int inW = _npu.InputWidth, inH = _npu.InputHeight;
         if (src == null || inW < 8 || inH < 8) return false;
         if (_mat == null) return false;
+
+        if (UseGlPath())
+            return TryQueueGlBlit(src, inW, inH);
+
         if (!EnsureInferRT(inW, inH)) return false;
         if (!EnsureCamCopyRT(src.width, src.height)) return false;
 
@@ -1495,6 +1568,245 @@ public class SemanticOcclusion : MonoBehaviour
             offset.y += scale.y;
             scale.y = -scale.y;
         }
+    }
+
+    bool TryQueueGlBlit(Texture src, int inW, int inH)
+    {
+        if (!EnsureFloatRT(inW, inH) || !EnsureMatteRT(inW, inH)) return false;
+
+        _stageLast[SWaitCam] = MsSince(_tWant);
+        _tFrame = Now();
+
+        if (!_eglCaptured)
+        {
+            IssueGlEvent(GlEventCapture);
+            _eglCaptured = true;
+        }
+
+        SquareCropScaleOffset(src.width, src.height, centreCrop, gpuBlitFlipY,
+            out Vector2 cropScale, out Vector2 cropOffset);
+        _disBlitMat.SetVector("_CropScale", cropScale);
+        _disBlitMat.SetVector("_CropOffset", cropOffset);
+        _disBlitMat.SetFloat("_Mean", inputMean);
+        _disBlitMat.SetFloat("_Scale", inputScale == 0f ? 1f : inputScale);
+        if (_mat != null && _mat.HasProperty(IdDisplay))
+            _disBlitMat.SetMatrix(IdDisplay, _mat.GetMatrix(IdDisplay));
+
+        try
+        {
+            if (IsBench)
+            {
+                _disBlitMat.SetFloat("_Normalize", 0f);
+                _disBlitMat.SetFloat("_Luma", 1f);
+                Graphics.Blit(src, _matteRT, _disBlitMat);
+            }
+            else
+            {
+                _disBlitMat.SetFloat("_Normalize", 1f);
+                _disBlitMat.SetFloat("_Luma", 0f);
+                Graphics.Blit(src, _inferFloatRT, _disBlitMat);
+                int rgbId = (int)_inferFloatRT.GetNativeTexturePtr();
+                int matteId = (int)_matteRT.GetNativeTexturePtr();
+                _npu.SetGlTextures(rgbId, matteId, inW);
+                IssueGlEvent(GlEventPack);
+                _glAwaitSubmit = true;
+                _glPackFrame = Time.frameCount;
+            }
+        }
+        catch (Exception e)
+        {
+            _loadNote = $"gl blit {src.width}x{src.height}: {e.Message}";
+            _glFailed = true;
+            return false;
+        }
+
+        _stageLast[SBlit] = MsSince(_tFrame);
+        _gpuDisplaySpace = true;
+        _camW = src.width;
+        _camH = src.height;
+        _fitW = inW;
+        _fitH = inH;
+        _convertNote = IsBench
+            ? $"{inW}x{inH} gl-zero-copy luma from {src.width}x{src.height}"
+            : $"{inW}x{inH} gl-zero-copy from {src.width}x{src.height}";
+        if (centreCrop) _convertNote += ", centred square";
+        if (gpuBlitFlipY) _convertNote += ", flipY";
+        EnsureMaskGeometry();
+
+        if (IsBench)
+        {
+            float tPaint = Now();
+            PackMaskGpu();
+            _stageLast[SPaint] = MsSince(tPaint);
+            _stageLast[SCopy] = _stageLast[SUnpack] = _stageLast[SSubmit] = 0f;
+            _stageLast[SFill] = _stageLast[SDecode] = _stageLast[SUpload] = 0f;
+            _stageLast[SRun] = 0f;
+            _stageLast[SE2E] = MsSince(_tFrame);
+            _tSubmit = Now();
+            StampMaskPeriod();
+            RecordStages();
+        }
+
+        return true;
+    }
+
+    void TrySubmitGl()
+    {
+        if (!_glAwaitSubmit || _npu.Busy) return;
+        if (Time.frameCount <= _glPackFrame) return;
+        _glAwaitSubmit = false;
+        float tSub = Now();
+        if (!_npu.SubmitGl() && !string.IsNullOrEmpty(_npu.LastError))
+        {
+            _loadNote = $"submitGl failed: {_npu.LastError}";
+            FailGl(_npu.LastError);
+        }
+        _stageLast[SSubmit] = MsSince(tSub);
+        _stageLast[SCopy] = _stageLast[SUnpack] = 0f;
+        _tSubmit = Now();
+    }
+
+    void CollectGlResult()
+    {
+        if (!_npu.GlPathReady) return;
+        if (!_npu.PollGl()) return;
+
+        _stageLast[SInferWait] = MsSince(_tSubmit);
+        _stageLast[SFill] = _npu.LastFillMs;
+        _stageLast[SRun] = _npu.LastRunMs;
+        _stageLast[SDecode] = _npu.LastDecodeMs;
+        IssueGlEvent(GlEventUnpack);
+        float tPaint = Now();
+        PackMaskGpu();
+        _stageLast[SPaint] = MsSince(tPaint);
+        _stageLast[SUpload] = 0f;
+        _stageLast[SE2E] = MsSince(_tFrame);
+        StampMaskPeriod();
+        RecordStages();
+        if (!string.IsNullOrEmpty(_npu.LastError))
+            _loadNote = $"gl infer: {_npu.LastError}";
+    }
+
+    void WatchGlFailure()
+    {
+        if (_glFailed || !_npu.GlPathReady || _npu.Busy || _glAwaitSubmit) return;
+        string e = _npu.LastError;
+        if (string.IsNullOrEmpty(e)) return;
+        if (e.IndexOf("REJECT gl", System.StringComparison.Ordinal) >= 0
+            || e.IndexOf("CreateFromGl", System.StringComparison.Ordinal) >= 0
+            || e.IndexOf("LiteRt", System.StringComparison.Ordinal) >= 0
+            || e.IndexOf("eglMakeCurrent", System.StringComparison.Ordinal) >= 0
+            || e.StartsWith("gl run", System.StringComparison.Ordinal)
+            || e.StartsWith("gl path", System.StringComparison.Ordinal))
+            FailGl(e);
+    }
+
+    void FailGl(string why)
+    {
+        if (_glFailed) return;
+        _glFailed = true;
+        _glAwaitSubmit = false;
+        _loadNote = "gl path failed — falling back to gpu-blit readback: " + why;
+        Debug.LogWarning("[Seg] " + _loadNote);
+    }
+
+    void StampMaskPeriod()
+    {
+        float now = Now();
+        if (_lastMaskAt >= 0f)
+            _maskPeriodMs = (now - _lastMaskAt) * 1000f;
+        _lastMaskAt = now;
+    }
+
+    void PackMaskGpu()
+    {
+        if (_maskPackMat == null || _matteRT == null) return;
+        EnsureMaskGeometry();
+        if (!EnsureMaskRT(_maskW, _maskH)) return;
+        _maskPackMat.SetTexture("_Matte", _matteRT);
+        _maskPackMat.SetFloat("_ScalarFloor", scalarFloor);
+        _maskPackMat.SetFloat("_PackedMetres", MatteFallbackMetres());
+        _maskPackMat.SetFloat("_MaxDist", maxOcclusionDistance);
+        _maskPackMat.SetVector("_Inset", new Vector4(_offX, _offY, 0f, 0f));
+        _maskPackMat.SetVector("_MatteSize", new Vector4(_npu.OutputWidth, _npu.OutputHeight, 0f, 0f));
+        _maskPackMat.SetVector("_MaskSize", new Vector4(_maskW, _maskH, 0f, 0f));
+        Graphics.Blit(_matteRT, _maskRT, _maskPackMat);
+        if (_mat != null) _mat.SetTexture(IdMask, _maskRT);
+        _mattePackedMetres = MatteFallbackMetres();
+        _lastThingPixels = 1;
+        _lastComponents = 1;
+        _lastExpanded = 1;
+    }
+
+    bool EnsureFloatRT(int w, int h)
+    {
+        if (_inferFloatRT != null && _inferFloatRT.IsCreated() &&
+            _inferFloatRT.width == w && _inferFloatRT.height == h)
+            return true;
+        ReleaseRT(ref _inferFloatRT);
+        _inferFloatRT = new RenderTexture(w, h, 0, RenderTextureFormat.ARGBFloat)
+        {
+            hideFlags = HideFlags.HideAndDontSave,
+            filterMode = FilterMode.Bilinear,
+            wrapMode = TextureWrapMode.Clamp,
+            useMipMap = false,
+            autoGenerateMips = false,
+            name = "SegInferFloatRT"
+        };
+        return _inferFloatRT.Create();
+    }
+
+    bool EnsureMatteRT(int w, int h)
+    {
+        if (_matteRT != null && _matteRT.IsCreated() &&
+            _matteRT.width == w && _matteRT.height == h)
+            return true;
+        ReleaseRT(ref _matteRT);
+        _matteRT = new RenderTexture(w, h, 0, RenderTextureFormat.RFloat)
+        {
+            hideFlags = HideFlags.HideAndDontSave,
+            filterMode = FilterMode.Bilinear,
+            wrapMode = TextureWrapMode.Clamp,
+            useMipMap = false,
+            autoGenerateMips = false,
+            enableRandomWrite = true,
+            name = "SegMatteRT"
+        };
+        return _matteRT.Create();
+    }
+
+    bool EnsureMaskRT(int w, int h)
+    {
+        if (w < 8 || h < 8) return false;
+        if (_maskRT != null && _maskRT.IsCreated() &&
+            _maskRT.width == w && _maskRT.height == h)
+            return true;
+        ReleaseRT(ref _maskRT);
+        _maskRT = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32)
+        {
+            hideFlags = HideFlags.HideAndDontSave,
+            filterMode = FilterMode.Bilinear,
+            wrapMode = TextureWrapMode.Clamp,
+            useMipMap = false,
+            autoGenerateMips = false,
+            name = "SegMaskRT"
+        };
+        return _maskRT.Create();
+    }
+
+    void ReleaseGlRTs()
+    {
+        ReleaseRT(ref _inferFloatRT);
+        ReleaseRT(ref _matteRT);
+        ReleaseRT(ref _maskRT);
+    }
+
+    static void ReleaseRT(ref RenderTexture rt)
+    {
+        if (rt == null) return;
+        rt.Release();
+        Destroy(rt);
+        rt = null;
     }
 
     void TryFinishGpuReadback()
