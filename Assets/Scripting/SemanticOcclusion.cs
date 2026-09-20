@@ -43,8 +43,8 @@ public class SemanticOcclusion : MonoBehaviour
     [SerializeField] string modelFile = DefaultModelFile;
 
     [Tooltip("Cycled by the HUD model button. Order: canny, bench, MODNet 256/512, " +
-             "U2-Net, Depth Anything 3, IS-Net. Device files, not the APK. `segmodel FILE` " +
-             "still loads anything.")]
+             "U2-Net, Depth Anything 3, IS-Net fp32/fp16. Device files, not the APK. " +
+             "`segmodel FILE` still loads anything.")]
     [SerializeField] string[] modelFiles =
     {
         CannyModel,
@@ -54,6 +54,7 @@ public class SemanticOcclusion : MonoBehaviour
         "u2net_320_fp16.tflite",
         "depth_anything_3_small_fp16.tflite",
         DefaultModelFile,
+        "dis_isnet_1024_fp16.tflite",
     };
 
     [SerializeField] SegBackend backend = SegBackend.GpuDec;
@@ -583,6 +584,7 @@ public class SemanticOcclusion : MonoBehaviour
             _catalogue.Add("u2net_320_fp16.tflite");
             _catalogue.Add("depth_anything_3_small_fp16.tflite");
             _catalogue.Add(DefaultModelFile);
+            _catalogue.Add("dis_isnet_1024_fp16.tflite");
         }
         if (!string.IsNullOrEmpty(modelFile) && IndexInCatalogue(_catalogue, modelFile) < 0)
             _catalogue.Insert(0, modelFile);
@@ -633,6 +635,7 @@ public class SemanticOcclusion : MonoBehaviour
         if (f.Contains("depth") || f.Contains("da3") || f.Contains("midas") || f.Contains("dpt"))
             return "da3";
         if (f.Contains("coral") || f.Contains("deeplab")) return "deeplab";
+        if (f.Contains("isnet") && f.Contains("fp16")) return "is16";
         if (f.Contains("isnet") || f.Contains("dis")) return "isnet";
         string n = Path.GetFileNameWithoutExtension(file);
         return n.Length <= 12 ? n : n.Substring(0, 12);
@@ -885,6 +888,7 @@ public class SemanticOcclusion : MonoBehaviour
             "u2net_320_fp16.tflite",
             "depth_anything_3_small_fp16.tflite",
             DefaultModelFile,
+            "dis_isnet_1024_fp16.tflite",
         };
         if (IsRetired(modelFile) || IndexInCatalogue(new List<string>(modelFiles), modelFile) < 0)
             modelFile = BenchModel;
