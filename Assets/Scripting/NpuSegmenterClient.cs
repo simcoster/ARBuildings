@@ -89,6 +89,8 @@ public sealed class NpuSegmenterClient : IDisposable
 #endif
     }
 
+    public int InferSide { get; set; }
+
     public bool LoadFile(string path, string backend)
     {
         Dispose();
@@ -97,6 +99,8 @@ public sealed class NpuSegmenterClient : IDisposable
         {
             _java = new AndroidJavaObject("com.pavel.arbuildings.NpuSegmenter");
             bool ok = _java.Call<bool>("loadFile", path, backend ?? "npu");
+            if (ok && InferSide >= 64)
+                _java.Call("setIoSize", InferSide);
             return FinishLoad(ok);
         }
         catch (Exception e)
@@ -151,6 +155,8 @@ public sealed class NpuSegmenterClient : IDisposable
         {
             _java = new AndroidJavaObject("com.pavel.arbuildings.NpuSegmenter");
             bool ok = _java.Call<bool>("loadBytes", modelBytes, backend ?? "npu");
+            if (ok && InferSide >= 64)
+                _java.Call("setIoSize", InferSide);
             return FinishLoad(ok);
         }
         catch (Exception e)

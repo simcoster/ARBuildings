@@ -66,6 +66,7 @@ GLuint g_unpack_prog = 0;
 std::atomic<GLuint> g_rgb_tex{0};
 std::atomic<GLuint> g_matte_tex{0};
 std::atomic<int> g_size{1024};
+int g_ssbo_side = 0;
 
 LiteRtEnvironment g_env = nullptr;
 LiteRtModel g_model = nullptr;
@@ -324,6 +325,75 @@ void AbandonPartialEgl() {
     eglDestroyContext(g_dpy, g_share);
     g_share = EGL_NO_CONTEXT;
   }
+  g_ssbo_side = 0;
+}
+
+bool EnsureSsbos() {
+  int sz = g_size.load();
+  if (sz < 64) {
+    SetErr("infer size unset");
+    return false;
+  }
+  GLsizeiptr in_bytes = (GLsizeiptr)3 * sz * sz * sizeof(float);
+  GLsizeiptr out_bytes = (GLsizeiptr)sz * sz * sizeof(float);
+  auto alloc = [](GLuint* b, GLsizeiptr bytes) {
+    if (!*b) glGenBuffers(1, b);
+    glBindBuffer(kSsbo, *b);
+    glBufferData(kSsbo, bytes, nullptr, GL_DYNAMIC_COPY);
+    glBindBuffer(kSsbo, 0);
+  };
+  if (g_ssbo_side != sz || !g_in_ssbo || !g_out_ssbo) {
+    alloc(&g_in_ssbo, in_bytes);
+    alloc(&g_out_ssbo, out_bytes);
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+      std::snprintf(g_err, sizeof(g_err), "EnsureSsbos glGetError 0x%x size=%d", err, sz);
+      LOGE("%s", g_err);
+      return false;
+    }
+    g_ssbo_side = sz;
+    LOGI("SSBOs %u/%u bytes %ld/%ld size=%d", g_in_ssbo, g_out_ssbo, (long)in_bytes,
+         (long)out_bytes, sz);
+  }
+  return true;
+}
+
+using FnResize = LiteRtStatus (*)(LiteRtCompiledModel, LiteRtParamIndex, LiteRtParamIndex,
+                                  const int*, size_t);
+
+bool ResizeToSize() {
+  int sz = g_size.load();
+  if (sz == 1024) {
+    LOGI("keeping baked 1024 input");
+    return true;
+  }
+  auto strict = Dl<FnResize>("LiteRtCompiledModelResizeInputTensor");
+  auto loose = Dl<FnResize>("LiteRtCompiledModelResizeInputTensorNonStrict");
+  if (!strict && !loose) {
+    SetErr("no ResizeInputTensor in libLiteRt; need a baked 512 tflite");
+    return false;
+  }
+  int dims[] = {1, 3, sz, sz};
+  LiteRtStatus st = kLiteRtStatusErrorUnsupported;
+  const char* which = "none";
+  if (strict) {
+    st = strict(g_compiled, 0, 0, dims, 4);
+    which = "strict";
+  }
+  if (st != kLiteRtStatusOk && loose) {
+    st = loose(g_compiled, 0, 0, dims, 4);
+    which = "nonstrict";
+  }
+  if (st != kLiteRtStatusOk) {
+    std::snprintf(g_err, sizeof(g_err),
+                  "ResizeInputTensor %s %d failed status=%d (DIS baked 1024; need re-export)",
+                  which, sz, (int)st);
+    LOGE("%s", g_err);
+    DumpLiteRtErrors(g_compiled);
+    return false;
+  }
+  LOGI("resized DIS input to 1x3x%dx%d via %s", sz, sz, which);
+  return true;
 }
 
 bool CaptureEgl() {
@@ -400,21 +470,7 @@ bool CaptureEgl() {
     return false;
   }
 
-  auto make_ssbo = [](GLsizeiptr bytes) {
-    GLuint b = 0;
-    glGenBuffers(1, &b);
-    glBindBuffer(kSsbo, b);
-    glBufferData(kSsbo, bytes, nullptr, GL_DYNAMIC_COPY);
-    glBindBuffer(kSsbo, 0);
-    return b;
-  };
-  const int sz = g_size.load();
-  g_in_ssbo = make_ssbo((GLsizeiptr)3 * sz * sz * sizeof(float));
-  g_out_ssbo = make_ssbo((GLsizeiptr)sz * sz * sizeof(float));
-  GLenum err = glGetError();
-  if (err != GL_NO_ERROR) {
-    std::snprintf(g_err, sizeof(g_err), "ssbo glGetError 0x%x", err);
-    LOGE("%s", g_err);
+  if (!EnsureSsbos()) {
     AbandonPartialEgl();
     return false;
   }
@@ -596,9 +652,17 @@ bool LoadModel(const char* path, const char* lib_dir) {
     CloseLiteRtUnlocked();
     return false;
   }
-  LOGI("CompiledModel GPU ok egl_env=1");
+  LOGI("CompiledModel GPU ok egl_env=1 size=%d", g_size.load());
 
   if (!WorkerMakeCurrent()) {
+    CloseLiteRtUnlocked();
+    return false;
+  }
+  if (!ResizeToSize()) {
+    CloseLiteRtUnlocked();
+    return false;
+  }
+  if (!EnsureSsbos()) {
     CloseLiteRtUnlocked();
     return false;
   }
@@ -720,8 +784,8 @@ Java_com_pavel_arbuildings_NpuSegmenter_nativeGlRunMs(JNIEnv*, jobject) {
 JNIEXPORT void JNICALL
 Java_com_pavel_arbuildings_NpuSegmenter_nativeGlSetTextures(JNIEnv*, jobject, jint rgb, jint matte,
                                                            jint size) {
-  g_rgb_tex.store((GLuint)rgb);
-  g_matte_tex.store((GLuint)matte);
+  if (rgb != 0) g_rgb_tex.store((GLuint)rgb);
+  if (matte != 0) g_matte_tex.store((GLuint)matte);
   if (size > 8) g_size.store(size);
 }
 

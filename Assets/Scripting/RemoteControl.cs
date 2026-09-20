@@ -41,6 +41,7 @@ using UnityEngine;
 ///     segdump         write the exact image the network was handed, and its mask, as PNGs
 ///     segmodel FILE   swap the .tflite at runtime — pair it with pushing one to the device
 ///                     `canny` is built in (CPU edges, no file)
+///     segsize N       DIS-ISNet only, after compile (0 = baked). 512 already failed on this graph
 ///     segnext         next model in the cycle — the same order as the HUD's model button
 ///     seglist         every model available, shipped or pushed, and which is live
 ///     segxnn on|off   XNNPACK, or TFLite's built-in kernels for graphs XNNPACK refuses
@@ -347,6 +348,13 @@ public class RemoteControl : MonoBehaviour
             case "segmodel":
                 if (seg == null) return "no semantic occlusion";
                 return seg.SetModel(arg);
+
+            case "segsize":
+                if (seg == null) return "no semantic occlusion";
+                if (arg.Length == 0) return $"segsize {seg.InferSide}";
+                if (!int.TryParse(arg, NumberStyles.Integer, CultureInfo.InvariantCulture, out int side))
+                    return $"ERROR '{arg}' is not a size";
+                return seg.SetInferSide(side);
 
             case "segnext":
                 if (seg == null) return "no semantic occlusion";

@@ -284,18 +284,35 @@ public final class NpuSegmenter {
         return n.contains("isnet") || n.contains("dis");
     }
 
-    /** DIS-ISNet LiteRT I/O is fixed: NCHW 1024² RGB in, NCHW 1024² sigmoid out. */
+    /** DIS-ISNet LiteRT I/O is NCHW float32. Baked file is 1024²; `setIoSize` can
+     *  ask LiteRT to resize after compile (FCN). */
     private void describeDisLiteRt() {
         nchw = true;
         inC = 3;
-        inH = inW = 1024;
+        int side = 1024;
+        String n = compiledPath == null ? "" : new File(compiledPath).getName();
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("_(\\d+)").matcher(n);
+        if (m.find()) {
+            try {
+                int parsed = Integer.parseInt(m.group(1));
+                if (parsed >= 64 && parsed <= 2048) side = parsed;
+            } catch (NumberFormatException ignored) { }
+        }
+        inH = inW = side;
         outNchw = true;
         outC = 1;
-        outH = outW = 1024;
+        outH = outW = side;
         inType = DataType.FLOAT32;
         outType = DataType.FLOAT32;
         compiledIn = new float[inC * inH * inW];
         kind = "alpha";
+    }
+
+    public void setIoSize(int side) {
+        if (side < 64 || side > 2048) return;
+        inH = inW = outH = outW = side;
+        if (inC < 1) inC = 3;
+        compiledIn = new float[inC * inH * inW];
     }
 
     private Interpreter.Options optionsFor(String backend) {
@@ -511,6 +528,7 @@ public final class NpuSegmenter {
         if (!nativeLoaded) return false;
         if (canny || bench || compiledPath == null) return false;
         glPath = true;
+        nativeGlSetTextures(0, 0, inW);
         return true;
     }
 

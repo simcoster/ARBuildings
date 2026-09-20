@@ -95,6 +95,10 @@ public class SemanticOcclusion : MonoBehaviour
              "frame matches the orientation the CPU path used to feed the network.")]
     [SerializeField] bool gpuBlitFlipY = true;
 
+    [Tooltip("Override DIS-ISNet spatial size after compile (LiteRT resize). 0 = baked " +
+             "size from the file. Runtime resize of this graph to 512 already failed.")]
+    [SerializeField] int inferSide = 0;
+
     [Tooltip("XNNPACK on the CPU backend. Off falls back to TFLite's built-in kernels, " +
              "which accept graphs XNNPACK refuses to load at all.")]
     [SerializeField] bool useXnnpack = true;
@@ -159,6 +163,7 @@ public class SemanticOcclusion : MonoBehaviour
     bool _gpuInputFailed;
     bool _gpuDisplaySpace;
     bool _glFailed;
+    string _ackedGlError;
     bool _glAwaitSubmit;
     int _glPackFrame = -1;
     int _eglWaitFrames;
@@ -294,6 +299,7 @@ public class SemanticOcclusion : MonoBehaviour
         gpuCameraInput = on;
         _gpuInputFailed = false;
         _glFailed = false;
+        _ackedGlError = null;
         _wantGpuCapture = false;
         _glAwaitSubmit = false;
         _eglWaitFrames = 0;
@@ -309,6 +315,25 @@ public class SemanticOcclusion : MonoBehaviour
     {
         get => gpuBlitFlipY;
         set => gpuBlitFlipY = value;
+    }
+
+    public int InferSide => inferSide;
+
+    public string SetInferSide(int side)
+    {
+        if (side != 0 && (side < 64 || side > 2048))
+            return $"ERROR segsize {side} — use 0 (baked) or 64..2048";
+        inferSide = side;
+        _npu.InferSide = IsDis ? inferSide : 0;
+        _maskW = _maskH = 0;
+        if (!enableOnStart)
+            return inferSide == 0
+                ? "segsize baked (from filename)"
+                : $"segsize {inferSide} (applies on next load)";
+        if (IsCanny || IsBench)
+            return $"segsize {inferSide} (ignored by {modelFile})";
+        if (!_reloading) StartCoroutine(LoadModel());
+        return $"segsize {inferSide} — reloading";
     }
 
     public string SetNormalization(float mean, float scale)
@@ -434,6 +459,11 @@ public class SemanticOcclusion : MonoBehaviour
     bool IsBench =>
         string.Equals(modelFile, BenchModel, StringComparison.OrdinalIgnoreCase);
 
+    bool IsDis =>
+        !string.IsNullOrEmpty(modelFile) &&
+        (modelFile.IndexOf("isnet", StringComparison.OrdinalIgnoreCase) >= 0
+         || modelFile.IndexOf("dis", StringComparison.OrdinalIgnoreCase) >= 0);
+
     public string SetBackend(SegBackend next)
     {
         backend = next;
@@ -503,6 +533,10 @@ public class SemanticOcclusion : MonoBehaviour
         // A segnorm override belongs to the model it was typed for, not to every model after.
         _normOverridden = false;
         _maskW = _maskH = 0;
+        _glFailed = false;
+        _ackedGlError = null;
+        _glAwaitSubmit = false;
+        _eglWaitFrames = 0;
         if (!enableOnStart)
         {
             _loadNote = $"idle {modelFile} — tap seg to load";
@@ -770,7 +804,8 @@ public class SemanticOcclusion : MonoBehaviour
             r.AppendLine($"seg mask period    : " +
                          (_maskPeriodMs < 0f ? "n/a" : $"{_maskPeriodMs:F0} ms") +
                          StageP50("period", _periodHist));
-            r.AppendLine($"seg input          : {_npu.InputWidth}x{_npu.InputHeight}");
+            r.AppendLine($"seg input          : {_npu.InputWidth}x{_npu.InputHeight}" +
+                         (inferSide > 0 ? $" (segsize {inferSide})" : " (baked)"));
             r.AppendLine($"seg convert        : {_convertNote}");
             r.AppendLine($"seg camera source  : " +
                          (!gpuCameraInput ? "cpu XRCpuImage"
@@ -828,6 +863,7 @@ public class SemanticOcclusion : MonoBehaviour
         _holdLeft = -1f;
         inferEveryNFrames = 1;
         inferIntervalSeconds = 0f;
+        inferSide = 0;
         _loadNote = $"idle {modelFile} — tap seg to load";
     }
 
@@ -981,6 +1017,7 @@ public class SemanticOcclusion : MonoBehaviour
 
     bool TryLoad(string backendArg)
     {
+        _npu.InferSide = IsDis ? inferSide : 0;
         if (IsCanny) return _npu.LoadCanny();
         if (IsBench) return _npu.LoadBench();
         if (!string.IsNullOrEmpty(_deviceModelPath))
@@ -1746,7 +1783,11 @@ public class SemanticOcclusion : MonoBehaviour
             || e.IndexOf("eglMakeCurrent", System.StringComparison.Ordinal) >= 0
             || e.StartsWith("gl run", System.StringComparison.Ordinal)
             || e.StartsWith("gl path", System.StringComparison.Ordinal))
+        {
+            if (e == _ackedGlError) return;
+            _ackedGlError = e;
             FailGl(e);
+        }
     }
 
     IEnumerator PumpEglCapture()
