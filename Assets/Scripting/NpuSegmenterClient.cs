@@ -293,10 +293,10 @@ public sealed class NpuSegmenterClient : IDisposable
         }
     }
 
-    public void SetGlTextures(int rgbTex, int matteTex, int size)
+    public void SetGlTextures(int rgbTex, int matteTex, int width, int height)
     {
         if (_java == null) return;
-        try { _java.Call("setGlTextures", rgbTex, matteTex, size); } catch { /* optional */ }
+        try { _java.Call("setGlTextures", rgbTex, matteTex, width, height); } catch { /* optional */ }
     }
 
     public bool SubmitGl()
@@ -336,7 +336,7 @@ public sealed class NpuSegmenterClient : IDisposable
     public static bool NativeGlAvailable() => false;
     public bool EglReady => false;
     public bool TryCaptureEgl() => false;
-    public void SetGlTextures(int rgbTex, int matteTex, int size) { }
+    public void SetGlTextures(int rgbTex, int matteTex, int width, int height) { }
     public bool SubmitGl() => false;
     public bool PollGl() => false;
 #endif

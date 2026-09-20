@@ -42,10 +42,17 @@ public class SemanticOcclusion : MonoBehaviour
     [SerializeField] bool enableOnStart;
     [SerializeField] string modelFile = DefaultModelFile;
 
-    [Tooltip("Cycled by the HUD's model button. DIS-ISNet is the only entry; it lives on " +
-             "the device (176 MB), not in the APK. `segmodel FILE` still loads anything.")]
+    [Tooltip("Cycled by the HUD model button. Order: canny, bench, MODNet 256/512, " +
+             "U2-Net, Depth Anything 3, IS-Net. Device files, not the APK. `segmodel FILE` " +
+             "still loads anything.")]
     [SerializeField] string[] modelFiles =
     {
+        CannyModel,
+        BenchModel,
+        "modnet_256.tflite",
+        "modnet_512.tflite",
+        "u2net_320_fp16.tflite",
+        "depth_anything_3_small_fp16.tflite",
         DefaultModelFile,
     };
 
@@ -386,9 +393,15 @@ public class SemanticOcclusion : MonoBehaviour
                 inputScale = 58.4f;
                 outputKind = "alpha";
             }
+            else if (f.Contains("depth") || f.Contains("midas") || f.Contains("da3"))
+            {
+                inputMean = 123.7f;
+                inputScale = 58.4f;
+                outputKind = "depth";
+            }
             else
             {
-                inputMean = 123.7f;   // ImageNet — u2net, cityscapes pidnet, midas
+                inputMean = 123.7f;   // ImageNet — u2net, cityscapes pidnet
                 inputScale = 58.4f;
             }
         }
@@ -542,14 +555,17 @@ public class SemanticOcclusion : MonoBehaviour
             _loadNote = $"idle {modelFile} — tap seg to load";
             return $"segmodel {modelFile} (not loaded until seg on)";
         }
-        _loadNote = $"loading {modelFile}";
+        _loadNote = $"segmodel {modelFile} — loading";
         if (!_reloading) StartCoroutine(LoadModel());
-        return $"segmodel {modelFile} — loading";
+        else
+            _loadNote = $"segmodel {modelFile} — queued";
+        return _loadNote;
     }
 
     /// <summary>
-    /// HUD cycle. Intentionally not every .tflite on the device — leftover toy nets
-    /// and mattes still sit in persistentDataPath from earlier pushes.
+    /// HUD cycle. Built-ins first, then the mattes/depth/IS-Net already on the phone.
+    /// Leftover toy nets in persistentDataPath stay off the button; `segmodel FILE` still
+    /// loads them.
     /// </summary>
     List<string> Catalogue()
     {
@@ -558,7 +574,16 @@ public class SemanticOcclusion : MonoBehaviour
             foreach (var m in modelFiles)
                 if (!string.IsNullOrWhiteSpace(m) && !_catalogue.Contains(m))
                     _catalogue.Add(m.Trim());
-
+        if (_catalogue.Count == 0)
+        {
+            _catalogue.Add(CannyModel);
+            _catalogue.Add(BenchModel);
+            _catalogue.Add("modnet_256.tflite");
+            _catalogue.Add("modnet_512.tflite");
+            _catalogue.Add("u2net_320_fp16.tflite");
+            _catalogue.Add("depth_anything_3_small_fp16.tflite");
+            _catalogue.Add(DefaultModelFile);
+        }
         if (!string.IsNullOrEmpty(modelFile) && IndexInCatalogue(_catalogue, modelFile) < 0)
             _catalogue.Insert(0, modelFile);
         return _catalogue;
@@ -602,16 +627,13 @@ public class SemanticOcclusion : MonoBehaviour
         string f = file.ToLowerInvariant();
         if (f == CannyModel) return "canny";
         if (f == BenchModel) return "bench";
+        if (f.Contains("modnet") && f.Contains("256")) return "m256";
+        if (f.Contains("modnet")) return "m512";
         if (f.Contains("u2net")) return "u2net";
-        if (f.Contains("modnet")) return "modnet";
+        if (f.Contains("depth") || f.Contains("da3") || f.Contains("midas") || f.Contains("dpt"))
+            return "da3";
         if (f.Contains("coral") || f.Contains("deeplab")) return "deeplab";
         if (f.Contains("isnet") || f.Contains("dis")) return "isnet";
-        if (f.Contains("mobilenetv4")) return "mnv4";
-        if (f.Contains("fast_scnn")) return "fastscnn";
-        if (f.Contains("bisenet")) return "bisenet";
-        if (f.Contains("pidnet")) return "pidnet";
-        if (f.Contains("cnn_s")) return "cnn_s";
-        if (f.Contains("midas") || f.Contains("dpt") || f.Contains("depth")) return "depth";
         string n = Path.GetFileNameWithoutExtension(file);
         return n.Length <= 12 ? n : n.Substring(0, 12);
     }
@@ -854,7 +876,16 @@ public class SemanticOcclusion : MonoBehaviour
         if (_occlusion == null) _occlusion = FindAnyObjectByType<AROcclusionManager>();
         if (_background == null) _background = FindAnyObjectByType<ARCameraBackground>();
         // Scene-serialized modelFiles / modelFile win over C# defaults.
-        modelFiles = new[] { BenchModel, DefaultModelFile };
+        modelFiles = new[]
+        {
+            CannyModel,
+            BenchModel,
+            "modnet_256.tflite",
+            "modnet_512.tflite",
+            "u2net_320_fp16.tflite",
+            "depth_anything_3_small_fp16.tflite",
+            DefaultModelFile,
+        };
         if (IsRetired(modelFile) || IndexInCatalogue(new List<string>(modelFiles), modelFile) < 0)
             modelFile = BenchModel;
         backend = PreferredBackend(modelFile);
@@ -957,54 +988,64 @@ public class SemanticOcclusion : MonoBehaviour
     IEnumerator LoadModel()
     {
         _reloading = true;
-        _loadNote = $"loading {modelFile} off-thread";
         // Closing the interpreter while the worker is inside interpreter.run is a native
-        // SIGSEGV. Wait until the current job finishes, then tear it down.
+        // SIGSEGV. Wait until the current job finishes, then tear it down. HUD cycle
+        // used to start a second coroutine; now it only retargets modelFile and this
+        // loop picks it up, so OpenCL is never destroyed under a live Run.
         yield return null;
-        while (_npu.Busy) yield return null;
-
-        string want = modelFile;
-        string devicePath = Path.Combine(Application.persistentDataPath, want);
-        _deviceModelPath = null;
-        _modelBytes = null;
-
-        if (IsCanny)
+        while (true)
         {
-            _loadNote = "canny 480² CPU (no tflite)";
-            yield return BindInterpreter();
-            yield break;
-        }
+            string want = modelFile;
+            _loadNote = $"loading {want} off-thread";
+            while (_npu.Busy) yield return null;
+            if (modelFile != want) continue;
 
-        if (IsBench)
-        {
-            _loadNote = "bench luma 1024² (1-layer stand-in, no tflite)";
-            yield return BindInterpreter();
-            yield break;
-        }
+            string devicePath = Path.Combine(Application.persistentDataPath, want);
+            _deviceModelPath = null;
+            _modelBytes = null;
 
-        if (File.Exists(devicePath))
-        {
-            _deviceModelPath = devicePath;
-            _loadNote = $"device {want} {new FileInfo(devicePath).Length} bytes (mmap)";
-        }
-        else
-        {
-            string path = $"{Application.streamingAssetsPath}/{want}";
-            string url = path.Contains("://") ? path : $"file://{path}";
-            using var req = UnityWebRequest.Get(url);
-            yield return req.SendWebRequest();
-            if (req.result != UnityWebRequest.Result.Success)
+            if (IsCanny)
             {
-                _loadNote = $"could not read {url}: {req.error}";
-                Debug.LogWarning("[Seg] " + _loadNote);
-                _reloading = false;
-                yield break;
+                _loadNote = "canny 480² CPU (no tflite)";
+                yield return BindInterpreter();
             }
-            _modelBytes = req.downloadHandler.data;
-            _loadNote = $"apk {want} {_modelBytes.Length} bytes";
-        }
+            else if (IsBench)
+            {
+                _loadNote = "bench luma 1024² (1-layer stand-in, no tflite)";
+                yield return BindInterpreter();
+            }
+            else if (File.Exists(devicePath))
+            {
+                _deviceModelPath = devicePath;
+                _loadNote = $"device {want} {new FileInfo(devicePath).Length} bytes (mmap)";
+                yield return BindInterpreter();
+            }
+            else
+            {
+                string path = $"{Application.streamingAssetsPath}/{want}";
+                string url = path.Contains("://") ? path : $"file://{path}";
+                using var req = UnityWebRequest.Get(url);
+                yield return req.SendWebRequest();
+                if (modelFile != want) continue;
+                if (req.result != UnityWebRequest.Result.Success)
+                {
+                    _loadNote = $"could not read {url}: {req.error}";
+                    Debug.LogWarning("[Seg] " + _loadNote);
+                    _reloading = false;
+                    yield break;
+                }
+                _modelBytes = req.downloadHandler.data;
+                _loadNote = $"apk {want} {_modelBytes.Length} bytes";
+                yield return BindInterpreter();
+            }
 
-        yield return BindInterpreter();
+            if (modelFile != want)
+            {
+                _reloading = true;
+                continue;
+            }
+            yield break;
+        }
     }
 
     IEnumerator ReloadBackend()
@@ -1516,8 +1557,8 @@ public class SemanticOcclusion : MonoBehaviour
                 _mat.SetFloat(IdSeg, segWas);
             }
 
-            SquareCropScaleOffset(_camCopyRT.width, _camCopyRT.height, centreCrop, gpuBlitFlipY,
-                out Vector2 scale, out Vector2 offset);
+            SquareCropScaleOffset(_camCopyRT.width, _camCopyRT.height, inW, inH,
+                centreCrop, gpuBlitFlipY, out Vector2 scale, out Vector2 offset);
             Graphics.Blit(_camCopyRT, _inferRT, scale, offset);
         }
         catch (Exception e)
@@ -1608,24 +1649,35 @@ public class SemanticOcclusion : MonoBehaviour
     }
 
     static void SquareCropScaleOffset(
-        int w, int h, bool crop, bool flipY, out Vector2 scale, out Vector2 offset)
+        int srcW, int srcH, int dstW, int dstH, bool crop, bool flipY,
+        out Vector2 scale, out Vector2 offset)
     {
-        if (!crop || w == h)
+        if (!crop || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0)
         {
             scale = Vector2.one;
             offset = Vector2.zero;
         }
-        else if (w > h)
-        {
-            float x = (w - h) / (2f * w);
-            scale = new Vector2((float)h / w, 1f);
-            offset = new Vector2(x, 0f);
-        }
         else
         {
-            float y = (h - w) / (2f * h);
-            scale = new Vector2(1f, (float)w / h);
-            offset = new Vector2(0f, y);
+            float srcA = (float)srcW / srcH;
+            float dstA = (float)dstW / dstH;
+            if (Mathf.Abs(srcA - dstA) < 1e-4f)
+            {
+                scale = Vector2.one;
+                offset = Vector2.zero;
+            }
+            else if (dstA > srcA)
+            {
+                float y = 1f - srcA / dstA;
+                scale = new Vector2(1f, srcA / dstA);
+                offset = new Vector2(0f, y * 0.5f);
+            }
+            else
+            {
+                float x = 1f - dstA / srcA;
+                scale = new Vector2(dstA / srcA, 1f);
+                offset = new Vector2(x * 0.5f, 0f);
+            }
         }
         if (flipY)
         {
@@ -1649,7 +1701,7 @@ public class SemanticOcclusion : MonoBehaviour
             return true;
         }
 
-        SquareCropScaleOffset(src.width, src.height, centreCrop, gpuBlitFlipY,
+        SquareCropScaleOffset(src.width, src.height, inW, inH, centreCrop, gpuBlitFlipY,
             out Vector2 cropScale, out Vector2 cropOffset);
         _disBlitMat.SetVector("_CropScale", cropScale);
         _disBlitMat.SetVector("_CropOffset", cropOffset);
@@ -1673,7 +1725,7 @@ public class SemanticOcclusion : MonoBehaviour
                 Graphics.Blit(src, _inferFloatRT, _disBlitMat);
                 int rgbId = (int)_inferFloatRT.GetNativeTexturePtr();
                 int matteId = (int)_matteRT.GetNativeTexturePtr();
-                _npu.SetGlTextures(rgbId, matteId, inW);
+                _npu.SetGlTextures(rgbId, matteId, inW, inH);
                 IssueGlEvent(GlEventPack);
                 _glAwaitSubmit = true;
                 _glPackFrame = Time.frameCount;
@@ -2204,7 +2256,9 @@ public class SemanticOcclusion : MonoBehaviour
             return SegBackend.Cpu;
         if (IsToySeg(file)) return SegBackend.GpuDec;
         string f = (file ?? string.Empty).ToLowerInvariant();
-        if (f.Contains("isnet") || f.Contains("dis_"))
+        if (f.Contains("isnet") || f.Contains("dis_")
+            || f.Contains("modnet") || f.Contains("u2net")
+            || f.Contains("depth_anything") || f.Contains("da3"))
             return SegBackend.GpuDec;
         return SegBackend.Cpu;
     }

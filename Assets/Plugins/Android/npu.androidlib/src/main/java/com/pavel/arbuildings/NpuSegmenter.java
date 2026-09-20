@@ -42,7 +42,7 @@ public final class NpuSegmenter {
     private native boolean nativeGlLoaded();
     private native String nativeGlError();
     private native float nativeGlRunMs();
-    private native void nativeGlSetTextures(int rgb, int matte, int size);
+    private native void nativeGlSetTextures(int rgb, int matte, int width, int height);
     private native boolean nativeGlLoad(String path, String libDir);
     private native boolean nativeGlRun();
     private native void nativeGlClose();
@@ -281,31 +281,39 @@ public final class NpuSegmenter {
         String b = backend == null ? "" : backend.toLowerCase(Locale.US);
         if (!("gpudec".equals(b) || "litert".equals(b))) return false;
         String n = path == null ? "" : new File(path).getName().toLowerCase(Locale.US);
-        return n.contains("isnet") || n.contains("dis");
+        return n.contains("isnet") || n.contains("dis")
+                || n.contains("modnet") || n.contains("u2net")
+                || n.contains("depth_anything") || n.contains("da3");
     }
 
-    /** DIS-ISNet LiteRT I/O is NCHW float32. Baked file is 1024²; `setIoSize` can
-     *  ask LiteRT to resize after compile (FCN). */
+    /** LiteRT GPU I/O for the mattes on the phone: NCHW float32 RGB in, NCHW
+     *  float32 matte out. Spatial size is baked in the filename. */
     private void describeDisLiteRt() {
         nchw = true;
         inC = 3;
-        int side = 1024;
-        String n = compiledPath == null ? "" : new File(compiledPath).getName();
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("_(\\d+)").matcher(n);
-        if (m.find()) {
-            try {
-                int parsed = Integer.parseInt(m.group(1));
-                if (parsed >= 64 && parsed <= 2048) side = parsed;
-            } catch (NumberFormatException ignored) { }
-        }
-        inH = inW = side;
         outNchw = true;
         outC = 1;
-        outH = outW = side;
         inType = DataType.FLOAT32;
         outType = DataType.FLOAT32;
-        compiledIn = new float[inC * inH * inW];
         kind = "alpha";
+        String n = compiledPath == null ? "" : new File(compiledPath).getName().toLowerCase(Locale.US);
+        if (n.contains("depth_anything") || n.contains("da3")) {
+            // LiteRT card: NCHW [1,3,896,504], not square.
+            inH = outH = 896;
+            inW = outW = 504;
+            kind = "depth";
+        } else {
+            int side = 1024;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("_(\\d+)").matcher(n);
+            if (m.find()) {
+                try {
+                    int parsed = Integer.parseInt(m.group(1));
+                    if (parsed >= 64 && parsed <= 2048) side = parsed;
+                } catch (NumberFormatException ignored) { }
+            }
+            inH = inW = outH = outW = side;
+        }
+        compiledIn = new float[inC * inH * inW];
     }
 
     public void setIoSize(int side) {
@@ -500,9 +508,9 @@ public final class NpuSegmenter {
         return true;
     }
 
-    public void setGlTextures(int rgbTex, int matteTex, int size) {
+    public void setGlTextures(int rgbTex, int matteTex, int width, int height) {
         if (!nativeLoaded) return;
-        nativeGlSetTextures(rgbTex, matteTex, size);
+        nativeGlSetTextures(rgbTex, matteTex, width, height);
     }
 
     public boolean eglReady() {
@@ -528,7 +536,7 @@ public final class NpuSegmenter {
         if (!nativeLoaded) return false;
         if (canny || bench || compiledPath == null) return false;
         glPath = true;
-        nativeGlSetTextures(0, 0, inW);
+        nativeGlSetTextures(0, 0, inW, inH);
         return true;
     }
 
@@ -629,32 +637,46 @@ public final class NpuSegmenter {
     }
 
     private void loop() {
-        while (true) {
-            byte[] job;
-            boolean gl;
-            synchronized (lock) {
-                while (running && !hasPending && !hasGlPending) {
-                    try {
-                        lock.wait(200);
-                    } catch (InterruptedException e) {
-                        return;
+        try {
+            while (true) {
+                byte[] job;
+                boolean gl;
+                synchronized (lock) {
+                    while (running && !hasPending && !hasGlPending) {
+                        try {
+                            lock.wait(200);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
                     }
+                    if (!running) return;
+                    gl = hasGlPending;
+                    hasGlPending = false;
+                    job = gl ? null : pending;
+                    if (!gl) hasPending = false;
                 }
-                if (!running) return;
-                gl = hasGlPending;
-                hasGlPending = false;
-                job = gl ? null : pending;
-                if (!gl) hasPending = false;
+
+                byte[] result = null;
+                boolean glOk = false;
+                if (gl) glOk = runGl();
+                else result = runOnce(job);
+
+                synchronized (lock) {
+                    readyLabels = result;
+                    glFrameDone = gl && glOk;
+                    inFlight = false;
+                }
             }
-
-            byte[] result = null;
-            boolean glOk = false;
-            if (gl) glOk = runGl();
-            else result = runOnce(job);
-
+        } finally {
+            // LiteRT OpenCL must be destroyed on this worker, with the share
+            // EGL context current. close() used to join then nativeGlClose from
+            // a ThreadPool thread — that is the HUD-cycle SIGSEGV in
+            // LiteRtDeleteMlDriftClDelegate.
+            if (nativeLoaded) {
+                try { nativeGlClose(); } catch (Throwable ignored) { }
+            }
             synchronized (lock) {
-                readyLabels = result;
-                glFrameDone = gl && glOk;
                 inFlight = false;
             }
         }
@@ -1027,7 +1049,6 @@ public final class NpuSegmenter {
             hasGlPending = false;
             glFrameDone = false;
             glPath = false;
-            inFlight = false;
             readyLabels = null;
             w = worker;
             worker = null;
@@ -1042,6 +1063,11 @@ public final class NpuSegmenter {
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
+            if (w.isAlive())
+                android.util.Log.e("NpuGl", "worker still alive after 30s join — skipped ThreadPool nativeGlClose");
+        }
+        synchronized (lock) {
+            inFlight = false;
         }
 
         if (interpreter != null) {
@@ -1064,7 +1090,9 @@ public final class NpuSegmenter {
         }
         compiledIn = null;
         compiledPath = null;
-        if (nativeLoaded) {
+        // Worker already ran nativeGlClose in loop()'s finally. This is a no-op
+        // unless the worker never started (canny/bench, or load failed first).
+        if (nativeLoaded && w == null) {
             try { nativeGlClose(); } catch (Throwable ignored) { }
         }
         inBuf = null;

@@ -19,6 +19,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #ifndef EGL_NO_SYNC_KHR
 #define EGL_NO_SYNC_KHR ((EGLSyncKHR)0)
@@ -65,8 +66,10 @@ GLuint g_pack_prog = 0;
 GLuint g_unpack_prog = 0;
 std::atomic<GLuint> g_rgb_tex{0};
 std::atomic<GLuint> g_matte_tex{0};
-std::atomic<int> g_size{1024};
-int g_ssbo_side = 0;
+std::atomic<int> g_w{1024};
+std::atomic<int> g_h{1024};
+int g_ssbo_w = 0;
+int g_ssbo_h = 0;
 
 LiteRtEnvironment g_env = nullptr;
 LiteRtModel g_model = nullptr;
@@ -77,6 +80,26 @@ LiteRtTensorBuffer g_out_tb = nullptr;
 std::string g_lib_dir;
 std::string g_model_path;
 
+// LiteRtDestroyCompiledModel → LiteRtDeleteMlDriftClDelegate SIGBUS on this
+// phone after any GL-CL Run (fault pc=0x10001), even on the worker with the
+// share context current. Cache each compiled graph and never destroy it.
+struct GpuGraph {
+  std::string path;
+  std::string lib_dir;
+  LiteRtEnvironment env = nullptr;
+  LiteRtModel model = nullptr;
+  LiteRtOptions opts = nullptr;
+  LiteRtCompiledModel compiled = nullptr;
+  LiteRtTensorBuffer in_tb = nullptr;
+  LiteRtTensorBuffer out_tb = nullptr;
+  GLuint in_ssbo = 0;
+  GLuint out_ssbo = 0;
+  int w = 0;
+  int h = 0;
+};
+std::vector<GpuGraph> g_graphs;
+int g_cur = -1;
+
 PFNEGLCREATESYNCKHRPROC pCreateSync = nullptr;
 PFNEGLDESTROYSYNCKHRPROC pDestroySync = nullptr;
 PFNEGLCLIENTWAITSYNCKHRPROC pClientWait = nullptr;
@@ -84,7 +107,7 @@ PFNEGLWAITSYNCKHRPROC pWaitSync = nullptr;
 
 void SetErr(const char* s) {
   std::snprintf(g_err, sizeof(g_err), "%s", s ? s : "");
-  LOGE("%s", g_err);
+  if (g_err[0]) LOGE("%s", g_err);
 }
 
 void SetErrf(const char* fmt, LiteRtStatus st) {
@@ -186,14 +209,15 @@ precision highp int;
 precision highp sampler2D;
 layout(local_size_x = 8, local_size_y = 8) in;
 uniform sampler2D uRgb;
-uniform int uSize;
+uniform int uWidth;
+uniform int uHeight;
 layout(std430, binding = 0) buffer InBuf { highp float data[]; };
 void main() {
   ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-  if (p.x >= uSize || p.y >= uSize) return;
+  if (p.x >= uWidth || p.y >= uHeight) return;
   vec3 c = texelFetch(uRgb, p, 0).rgb;
-  int i = p.y * uSize + p.x;
-  int plane = uSize * uSize;
+  int i = p.y * uWidth + p.x;
+  int plane = uWidth * uHeight;
   data[i] = c.r;
   data[plane + i] = c.g;
   data[2 * plane + i] = c.b;
@@ -205,13 +229,14 @@ precision highp float;
 precision highp int;
 precision highp image2D;
 layout(local_size_x = 8, local_size_y = 8) in;
-uniform int uSize;
+uniform int uWidth;
+uniform int uHeight;
 layout(std430, binding = 0) buffer OutBuf { highp float data[]; };
 layout(r32f, binding = 1) uniform highp writeonly image2D uMatte;
 void main() {
   ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-  if (p.x >= uSize || p.y >= uSize) return;
-  int i = p.y * uSize + p.x;
+  if (p.x >= uWidth || p.y >= uHeight) return;
+  int i = p.y * uWidth + p.x;
   imageStore(uMatte, p, vec4(data[i], 0.0, 0.0, 1.0));
 }
 )";
@@ -312,9 +337,21 @@ bool TryPbuffer(EGLConfig cfg) {
   return g_pbuffer != EGL_NO_SURFACE;
 }
 
+void DeleteSsbos() {
+  if (g_in_ssbo) {
+    glDeleteBuffers(1, &g_in_ssbo);
+    g_in_ssbo = 0;
+  }
+  if (g_out_ssbo) {
+    glDeleteBuffers(1, &g_out_ssbo);
+    g_out_ssbo = 0;
+  }
+  g_ssbo_w = 0;
+  g_ssbo_h = 0;
+}
+
 void AbandonPartialEgl() {
-  if (g_in_ssbo) { glDeleteBuffers(1, &g_in_ssbo); g_in_ssbo = 0; }
-  if (g_out_ssbo) { glDeleteBuffers(1, &g_out_ssbo); g_out_ssbo = 0; }
+  DeleteSsbos();
   if (g_pack_prog) { glDeleteProgram(g_pack_prog); g_pack_prog = 0; }
   if (g_unpack_prog) { glDeleteProgram(g_unpack_prog); g_unpack_prog = 0; }
   if (g_pbuffer != EGL_NO_SURFACE) {
@@ -325,35 +362,40 @@ void AbandonPartialEgl() {
     eglDestroyContext(g_dpy, g_share);
     g_share = EGL_NO_CONTEXT;
   }
-  g_ssbo_side = 0;
 }
 
 bool EnsureSsbos() {
-  int sz = g_size.load();
-  if (sz < 64) {
+  int w = g_w.load();
+  int h = g_h.load();
+  if (w < 8 || h < 8) {
     SetErr("infer size unset");
     return false;
   }
-  GLsizeiptr in_bytes = (GLsizeiptr)3 * sz * sz * sizeof(float);
-  GLsizeiptr out_bytes = (GLsizeiptr)sz * sz * sizeof(float);
-  auto alloc = [](GLuint* b, GLsizeiptr bytes) {
-    if (!*b) glGenBuffers(1, b);
-    glBindBuffer(kSsbo, *b);
-    glBufferData(kSsbo, bytes, nullptr, GL_DYNAMIC_COPY);
+  GLsizeiptr in_bytes = (GLsizeiptr)3 * w * h * sizeof(float);
+  GLsizeiptr out_bytes = (GLsizeiptr)w * h * sizeof(float);
+  // glBufferData on a buffer LiteRT already imported as a CL-GL object leaves a
+  // stale OpenCL mem on Adreno — every later Run then dies with LITERT_CL
+  // "failed to invoke". Delete and allocate a new name instead.
+  if (g_ssbo_w != w || g_ssbo_h != h || !g_in_ssbo || !g_out_ssbo) {
+    DeleteSsbos();
+    glGenBuffers(1, &g_in_ssbo);
+    glBindBuffer(kSsbo, g_in_ssbo);
+    glBufferData(kSsbo, in_bytes, nullptr, GL_DYNAMIC_COPY);
+    glGenBuffers(1, &g_out_ssbo);
+    glBindBuffer(kSsbo, g_out_ssbo);
+    glBufferData(kSsbo, out_bytes, nullptr, GL_DYNAMIC_COPY);
     glBindBuffer(kSsbo, 0);
-  };
-  if (g_ssbo_side != sz || !g_in_ssbo || !g_out_ssbo) {
-    alloc(&g_in_ssbo, in_bytes);
-    alloc(&g_out_ssbo, out_bytes);
     GLenum err = glGetError();
     if (err != GL_NO_ERROR) {
-      std::snprintf(g_err, sizeof(g_err), "EnsureSsbos glGetError 0x%x size=%d", err, sz);
+      std::snprintf(g_err, sizeof(g_err), "EnsureSsbos glGetError 0x%x %dx%d", err, w, h);
       LOGE("%s", g_err);
+      DeleteSsbos();
       return false;
     }
-    g_ssbo_side = sz;
-    LOGI("SSBOs %u/%u bytes %ld/%ld size=%d", g_in_ssbo, g_out_ssbo, (long)in_bytes,
-         (long)out_bytes, sz);
+    g_ssbo_w = w;
+    g_ssbo_h = h;
+    LOGI("SSBOs %u/%u bytes %ld/%ld %dx%d", g_in_ssbo, g_out_ssbo, (long)in_bytes,
+         (long)out_bytes, w, h);
   }
   return true;
 }
@@ -361,10 +403,30 @@ bool EnsureSsbos() {
 using FnResize = LiteRtStatus (*)(LiteRtCompiledModel, LiteRtParamIndex, LiteRtParamIndex,
                                   const int*, size_t);
 
+int BakedSideFromPath(const char* path, int fallback) {
+  if (!path || !*path) return fallback;
+  const char* slash = std::strrchr(path, '/');
+  const char* name = slash ? slash + 1 : path;
+  int last = fallback;
+  for (const char* p = name; *p; ++p) {
+    if (*p == '_' && p[1] >= '0' && p[1] <= '9') {
+      int v = std::atoi(p + 1);
+      if (v >= 64 && v <= 2048) last = v;
+    }
+  }
+  return last;
+}
+
 bool ResizeToSize() {
-  int sz = g_size.load();
-  if (sz == 1024) {
-    LOGI("keeping baked 1024 input");
+  int w = g_w.load();
+  int h = g_h.load();
+  if (w != h) {
+    LOGI("keeping rectangular %dx%d input", w, h);
+    return true;
+  }
+  int baked = BakedSideFromPath(g_model_path.c_str(), 1024);
+  if (w == baked) {
+    LOGI("keeping baked %d input", baked);
     return true;
   }
   auto strict = Dl<FnResize>("LiteRtCompiledModelResizeInputTensor");
@@ -373,7 +435,7 @@ bool ResizeToSize() {
     SetErr("no ResizeInputTensor in libLiteRt; need a baked 512 tflite");
     return false;
   }
-  int dims[] = {1, 3, sz, sz};
+  int dims[] = {1, 3, w, w};
   LiteRtStatus st = kLiteRtStatusErrorUnsupported;
   const char* which = "none";
   if (strict) {
@@ -387,12 +449,12 @@ bool ResizeToSize() {
   if (st != kLiteRtStatusOk) {
     std::snprintf(g_err, sizeof(g_err),
                   "ResizeInputTensor %s %d failed status=%d (DIS baked 1024; need re-export)",
-                  which, sz, (int)st);
+                  which, w, (int)st);
     LOGE("%s", g_err);
     DumpLiteRtErrors(g_compiled);
     return false;
   }
-  LOGI("resized DIS input to 1x3x%dx%d via %s", sz, sz, which);
+  LOGI("resized DIS input to 1x3x%dx%d via %s", w, w, which);
   return true;
 }
 
@@ -477,22 +539,26 @@ bool CaptureEgl() {
 
   g_egl_ready.store(true);
   SetErr("");
-  LOGI("EGL captured, SSBOs %u/%u size=%d", g_in_ssbo, g_out_ssbo, g_size.load());
+  LOGI("EGL captured, SSBOs %u/%u %dx%d", g_in_ssbo, g_out_ssbo, g_w.load(), g_h.load());
   return true;
 }
 
 void PackNchw() {
   GLuint rgb = g_rgb_tex.load();
-  int sz = g_size.load();
+  int w = g_w.load();
+  int h = g_h.load();
   if (!g_pack_prog || !rgb || !g_in_ssbo) return;
+  if (w != g_ssbo_w || h != g_ssbo_h) return;
   glUseProgram(g_pack_prog);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, rgb);
   glUniform1i(glGetUniformLocation(g_pack_prog, "uRgb"), 0);
-  glUniform1i(glGetUniformLocation(g_pack_prog, "uSize"), sz);
+  glUniform1i(glGetUniformLocation(g_pack_prog, "uWidth"), w);
+  glUniform1i(glGetUniformLocation(g_pack_prog, "uHeight"), h);
   glBindBufferBase(kSsbo, 0, g_in_ssbo);
-  GLuint groups = (GLuint)((sz + 7) / 8);
-  glDispatchCompute(groups, groups, 1);
+  GLuint gx = (GLuint)((w + 7) / 8);
+  GLuint gy = (GLuint)((h + 7) / 8);
+  glDispatchCompute(gx, gy, 1);
   glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
   DestroySync(&g_blit_sync);
   g_blit_sync = pCreateSync(g_dpy, EGL_SYNC_FENCE_KHR, nullptr);
@@ -501,8 +567,10 @@ void PackNchw() {
 
 void UnpackMatte() {
   GLuint matte = g_matte_tex.load();
-  int sz = g_size.load();
+  int w = g_w.load();
+  int h = g_h.load();
   if (!g_unpack_prog || !matte || !g_out_ssbo) return;
+  if (w != g_ssbo_w || h != g_ssbo_h) return;
   if (g_out_sync && g_out_sync != EGL_NO_SYNC_KHR) {
     if (pWaitSync)
       pWaitSync(g_dpy, g_out_sync, 0);
@@ -510,23 +578,27 @@ void UnpackMatte() {
       pClientWait(g_dpy, g_out_sync, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER_KHR);
   }
   glUseProgram(g_unpack_prog);
-  glUniform1i(glGetUniformLocation(g_unpack_prog, "uSize"), sz);
+  glUniform1i(glGetUniformLocation(g_unpack_prog, "uWidth"), w);
+  glUniform1i(glGetUniformLocation(g_unpack_prog, "uHeight"), h);
   glBindBufferBase(kSsbo, 0, g_out_ssbo);
   glBindImageTexture(1, matte, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
-  GLuint groups = (GLuint)((sz + 7) / 8);
-  glDispatchCompute(groups, groups, 1);
+  GLuint gx = (GLuint)((w + 7) / 8);
+  GLuint gy = (GLuint)((h + 7) / 8);
+  glDispatchCompute(gx, gy, 1);
   glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
 }
 
-bool WorkerMakeCurrent() {
+bool WorkerMakeCurrent(bool silent = false) {
   if (!g_egl_ready.load()) {
-    SetErr("EGL not captured yet");
+    if (!silent) SetErr("EGL not captured yet");
     return false;
   }
   EGLSurface surf = g_pbuffer != EGL_NO_SURFACE ? g_pbuffer : EGL_NO_SURFACE;
   if (!eglMakeCurrent(g_dpy, surf, surf, g_share)) {
-    std::snprintf(g_err, sizeof(g_err), "worker eglMakeCurrent 0x%x", eglGetError());
-    LOGE("%s", g_err);
+    if (!silent) {
+      std::snprintf(g_err, sizeof(g_err), "worker eglMakeCurrent 0x%x", eglGetError());
+      LOGE("%s", g_err);
+    }
     return false;
   }
   return true;
@@ -544,33 +616,91 @@ LiteRtRankedTensorType MakeType(int c, int h, int w) {
   return t;
 }
 
-void CloseLiteRtUnlocked() {
-  if (g_in_tb) {
-    LiteRtDestroyTensorBuffer(g_in_tb);
-    g_in_tb = nullptr;
-  }
-  if (g_out_tb) {
-    LiteRtDestroyTensorBuffer(g_out_tb);
-    g_out_tb = nullptr;
-  }
-  if (g_compiled) {
-    LiteRtDestroyCompiledModel(g_compiled);
-    g_compiled = nullptr;
-  }
-  if (g_opts) {
-    LiteRtDestroyOptions(g_opts);
-    g_opts = nullptr;
-  }
-  if (g_model) {
-    LiteRtDestroyModel(g_model);
-    g_model = nullptr;
-  }
-  if (g_env) {
-    LiteRtDestroyEnvironment(g_env);
-    g_env = nullptr;
-  }
+void ApplyGraph(const GpuGraph& g) {
+  g_model_path = g.path;
+  g_lib_dir = g.lib_dir;
+  g_env = g.env;
+  g_model = g.model;
+  g_opts = g.opts;
+  g_compiled = g.compiled;
+  g_in_tb = g.in_tb;
+  g_out_tb = g.out_tb;
+  g_in_ssbo = g.in_ssbo;
+  g_out_ssbo = g.out_ssbo;
+  g_ssbo_w = g.w;
+  g_ssbo_h = g.h;
+  if (g.w > 8) g_w.store(g.w);
+  if (g.h > 8) g_h.store(g.h);
+}
+
+void DetachGlobals() {
+  g_env = nullptr;
+  g_model = nullptr;
+  g_opts = nullptr;
+  g_compiled = nullptr;
+  g_in_tb = nullptr;
+  g_out_tb = nullptr;
+  g_in_ssbo = 0;
+  g_out_ssbo = 0;
+  g_ssbo_w = 0;
+  g_ssbo_h = 0;
+  g_cur = -1;
   g_loaded.store(false);
   g_bound.store(false);
+}
+
+void ParkCurrent() {
+  if (g_cur >= 0 && g_cur < (int)g_graphs.size()) {
+    GpuGraph& g = g_graphs[g_cur];
+    g.path = g_model_path;
+    g.lib_dir = g_lib_dir;
+    g.env = g_env;
+    g.model = g_model;
+    g.opts = g_opts;
+    g.compiled = g_compiled;
+    g.in_tb = g_in_tb;
+    g.out_tb = g_out_tb;
+    g.in_ssbo = g_in_ssbo;
+    g.out_ssbo = g_out_ssbo;
+    g.w = g_ssbo_w;
+    g.h = g_ssbo_h;
+    LOGI("parked %s ssbo %u/%u (%zu cached)", g.path.c_str(), g.in_ssbo, g.out_ssbo,
+         g_graphs.size());
+  }
+  DetachGlobals();
+}
+
+void CacheCurrent() {
+  GpuGraph g;
+  g.path = g_model_path;
+  g.lib_dir = g_lib_dir;
+  g.env = g_env;
+  g.model = g_model;
+  g.opts = g_opts;
+  g.compiled = g_compiled;
+  g.in_tb = g_in_tb;
+  g.out_tb = g_out_tb;
+  g.in_ssbo = g_in_ssbo;
+  g.out_ssbo = g_out_ssbo;
+  g.w = g_ssbo_w;
+  g.h = g_ssbo_h;
+  g_graphs.push_back(g);
+  g_cur = (int)g_graphs.size() - 1;
+  LOGI("cached %s ssbo %u/%u (%zu cached)", g.path.c_str(), g.in_ssbo, g.out_ssbo,
+       g_graphs.size());
+}
+
+int FindGraph(const char* path) {
+  if (!path || !*path) return -1;
+  for (int i = 0; i < (int)g_graphs.size(); ++i)
+    if (g_graphs[i].path == path) return i;
+  return -1;
+}
+
+void CloseLiteRtUnlocked() {
+  // Do not call LiteRtDestroyCompiledModel. After a GL-CL Run it SIGBUS in
+  // LiteRtDeleteMlDriftClDelegate on this Adreno, worker thread, EGL current.
+  ParkCurrent();
 }
 
 bool CreateLiteRtEnv(bool with_egl) {
@@ -633,62 +763,86 @@ bool CompileGpu() {
 }
 
 bool LoadModel(const char* path, const char* lib_dir) {
-  if (g_loaded.load()) return true;
+  const char* next = path ? path : "";
+  if (lib_dir && *lib_dir) g_lib_dir = lib_dir;
 
-  g_model_path = path ? path : "";
-  g_lib_dir = lib_dir ? lib_dir : "";
+  if (g_cur >= 0 && g_cur < (int)g_graphs.size() && g_graphs[g_cur].path == next
+      && g_compiled) {
+    g_loaded.store(true);
+    g_bound.store(true);
+    LOGI("LoadModel already current %s", next);
+    return true;
+  }
+  int hit = FindGraph(next);
+  if (hit >= 0) {
+    ParkCurrent();
+    g_cur = hit;
+    ApplyGraph(g_graphs[hit]);
+    g_loaded.store(true);
+    g_bound.store(true);
+    LOGI("LoadModel cache hit %s ssbo %u/%u %dx%d", next, g_in_ssbo, g_out_ssbo,
+         g_ssbo_w, g_ssbo_h);
+    SetErr("");
+    return true;
+  }
+
+  ParkCurrent();
+  g_model_path = next;
+  if (lib_dir) g_lib_dir = lib_dir;
 
   // LiteRT OpenCL delegate: eglGetCurrentContext() must equal the env's EGL
   // context (delegate_opencl.cc:632 "EGL context or display does not match").
   // That check runs on THIS worker, not Unity's render thread — the S24 hang
   // was compiling on the render thread, not sharing a pbuffer context here.
   if (!WorkerMakeCurrent()) {
-    CloseLiteRtUnlocked();
+    DetachGlobals();
     return false;
   }
   LogGpuState("LoadModel after MakeCurrent (share must be current)");
   if (!CreateLiteRtEnv(true) || !CompileGpu()) {
     LOGW("GPU compile with EGL env failed (%s)", g_err);
-    CloseLiteRtUnlocked();
+    DetachGlobals();
     return false;
   }
-  LOGI("CompiledModel GPU ok egl_env=1 size=%d", g_size.load());
+  LOGI("CompiledModel GPU ok egl_env=1 %dx%d", g_w.load(), g_h.load());
 
   if (!WorkerMakeCurrent()) {
-    CloseLiteRtUnlocked();
+    DetachGlobals();
     return false;
   }
   if (!ResizeToSize()) {
-    CloseLiteRtUnlocked();
+    DetachGlobals();
     return false;
   }
   if (!EnsureSsbos()) {
-    CloseLiteRtUnlocked();
+    DetachGlobals();
     return false;
   }
 
-  const int sz = g_size.load();
-  auto in_ty = MakeType(3, sz, sz);
-  auto out_ty = MakeType(1, sz, sz);
-  size_t in_bytes = (size_t)3 * sz * sz * sizeof(float);
-  size_t out_bytes = (size_t)sz * sz * sizeof(float);
+  const int w = g_w.load();
+  const int h = g_h.load();
+  auto in_ty = MakeType(3, h, w);
+  auto out_ty = MakeType(1, h, w);
+  size_t in_bytes = (size_t)3 * w * h * sizeof(float);
+  size_t out_bytes = (size_t)w * h * sizeof(float);
   LiteRtStatus st = LiteRtCreateTensorBufferFromGlBuffer(
       g_env, &in_ty, kSsbo, g_in_ssbo, in_bytes, 0, nullptr, &g_in_tb);
   if (st != kLiteRtStatusOk) {
     SetErrf("CreateFromGlBuffer input", st);
-    CloseLiteRtUnlocked();
+    DetachGlobals();
     return false;
   }
   st = LiteRtCreateTensorBufferFromGlBuffer(g_env, &out_ty, kSsbo, g_out_ssbo, out_bytes, 0,
                                             nullptr, &g_out_tb);
   if (st != kLiteRtStatusOk) {
     SetErrf("CreateFromGlBuffer output", st);
-    CloseLiteRtUnlocked();
+    DetachGlobals();
     return false;
   }
 
   g_loaded.store(true);
   g_bound.store(true);
+  CacheCurrent();
   SetErr("");
   LOGI("CompiledModel GPU bound to GL SSBOs %u/%u", g_in_ssbo, g_out_ssbo);
   return true;
@@ -716,7 +870,8 @@ bool Run() {
   auto t0 = std::chrono::steady_clock::now();
   LiteRtStatus st = LiteRtRunCompiledModel(g_compiled, 0, 1, &g_in_tb, 1, &g_out_tb);
   auto t1 = std::chrono::steady_clock::now();
-  g_run_ms.store(std::chrono::duration<float, std::milli>(t1 - t0).count());
+  float ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
+  g_run_ms.store(ms);
   if (st != kLiteRtStatusOk) {
     SetErrf("LiteRtRunCompiledModel", st);
     DumpLiteRtErrors(g_compiled);
@@ -728,6 +883,7 @@ bool Run() {
   g_out_sync = pCreateSync(g_dpy, EGL_SYNC_FENCE_KHR, nullptr);
   glFlush();
   SetErr("");
+  LOGI("Run ok %.1f ms %dx%d", ms, g_ssbo_w, g_ssbo_h);
   return true;
 }
 
@@ -783,10 +939,12 @@ Java_com_pavel_arbuildings_NpuSegmenter_nativeGlRunMs(JNIEnv*, jobject) {
 
 JNIEXPORT void JNICALL
 Java_com_pavel_arbuildings_NpuSegmenter_nativeGlSetTextures(JNIEnv*, jobject, jint rgb, jint matte,
-                                                           jint size) {
+                                                           jint width, jint height) {
   if (rgb != 0) g_rgb_tex.store((GLuint)rgb);
   if (matte != 0) g_matte_tex.store((GLuint)matte);
-  if (size > 8) g_size.store(size);
+  if (width > 8) g_w.store(width);
+  if (height > 8) g_h.store(height);
+  else if (width > 8) g_h.store(width);
 }
 
 JNIEXPORT jboolean JNICALL
@@ -803,6 +961,7 @@ Java_com_pavel_arbuildings_NpuSegmenter_nativeGlLoad(JNIEnv* env, jobject, jstri
 
 JNIEXPORT jboolean JNICALL
 Java_com_pavel_arbuildings_NpuSegmenter_nativeGlRun(JNIEnv*, jobject) {
+  std::lock_guard<std::mutex> lock(g_mu);
   return Run() ? JNI_TRUE : JNI_FALSE;
 }
 
