@@ -31,6 +31,14 @@ typedef enum {
 typedef int LiteRtHwAcceleratorSet;
 typedef size_t LiteRtParamIndex;
 
+typedef struct LiteRtOpaqueOptionsT* LiteRtOpaqueOptions;
+typedef struct LiteRtRuntimeOptionsT* LiteRtRuntimeOptions;
+
+typedef enum {
+  kLiteRtErrorReporterModeNone = 0,
+  kLiteRtErrorReporterModeStderr = 1,
+  kLiteRtErrorReporterModeBuffer = 2,
+} LiteRtErrorReporterMode;
 typedef struct LiteRtEnvironmentT* LiteRtEnvironment;
 typedef struct LiteRtModelT* LiteRtModel;
 typedef struct LiteRtCompiledModelT* LiteRtCompiledModel;

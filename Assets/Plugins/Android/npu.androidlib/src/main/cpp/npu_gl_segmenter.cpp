@@ -8,11 +8,14 @@
 #include <GLES3/gl3.h>
 #include <GLES3/gl31.h>
 #include <android/log.h>
+#include <dlfcn.h>
 #include <jni.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -86,6 +89,94 @@ void SetErr(const char* s) {
 void SetErrf(const char* fmt, LiteRtStatus st) {
   std::snprintf(g_err, sizeof(g_err), "%s status=%d", fmt, (int)st);
   LOGE("%s", g_err);
+}
+
+using FnCreateRuntimeOptions = LiteRtStatus (*)(LiteRtOpaqueOptions*);
+using FnFindRuntimeOptions = LiteRtStatus (*)(LiteRtOpaqueOptions, LiteRtRuntimeOptions*);
+using FnSetReporterMode = LiteRtStatus (*)(LiteRtRuntimeOptions, LiteRtErrorReporterMode);
+using FnAddOpaque = LiteRtStatus (*)(LiteRtOptions, LiteRtOpaqueOptions);
+using FnGetErrorMessages = LiteRtStatus (*)(LiteRtCompiledModel, char**);
+
+template <typename Fn>
+Fn Dl(const char* name) {
+  return reinterpret_cast<Fn>(dlsym(RTLD_DEFAULT, name));
+}
+
+void AttachBufferReporter(LiteRtOptions opts) {
+  auto create = Dl<FnCreateRuntimeOptions>("LiteRtCreateRuntimeOptions");
+  auto find = Dl<FnFindRuntimeOptions>("LiteRtFindRuntimeOptions");
+  auto set_mode = Dl<FnSetReporterMode>("LiteRtSetRuntimeOptionsErrorReporterMode");
+  auto add = Dl<FnAddOpaque>("LiteRtAddOpaqueOptions");
+  if (!create || !find || !set_mode || !add) {
+    LOGW("LiteRT 2.1 has no runtime error-reporter C API (dlsym missed) — using logcat");
+    return;
+  }
+  LiteRtOpaqueOptions opaque = nullptr;
+  if (create(&opaque) != kLiteRtStatusOk || !opaque) {
+    LOGW("LiteRtCreateRuntimeOptions failed");
+    return;
+  }
+  LiteRtRuntimeOptions rt = nullptr;
+  if (find(opaque, &rt) != kLiteRtStatusOk || !rt) {
+    LOGW("LiteRtFindRuntimeOptions failed");
+    return;
+  }
+  if (set_mode(rt, kLiteRtErrorReporterModeBuffer) != kLiteRtStatusOk) {
+    LOGW("LiteRtSetRuntimeOptionsErrorReporterMode failed");
+    return;
+  }
+  if (add(opts, opaque) != kLiteRtStatusOk) {
+    LOGW("LiteRtAddOpaqueOptions failed");
+    return;
+  }
+  LOGI("LiteRT buffer error reporter attached");
+}
+
+void DumpLiteRtErrors(LiteRtCompiledModel model) {
+  if (!model) {
+    LOGW("DumpLiteRtErrors: no compiled model (CreateCompiledModel never returned one)");
+    return;
+  }
+  auto get = Dl<FnGetErrorMessages>("LiteRtCompiledModelGetErrorMessages");
+  if (!get) {
+    LOGW("LiteRtCompiledModelGetErrorMessages not exported — use unfiltered logcat");
+    return;
+  }
+  char* msg = nullptr;
+  if (get(model, &msg) != kLiteRtStatusOk || !msg) {
+    LOGW("GetErrorMessages empty or failed");
+    return;
+  }
+  LOGE("LiteRT error buffer: %s", msg);
+  free(msg);
+}
+
+void LogGpuState(const char* where) {
+  EGLDisplay cur_dpy = eglGetCurrentDisplay();
+  EGLContext cur_ctx = eglGetCurrentContext();
+  EGLint egl_err = eglGetError();
+  GLenum gl_err = GL_NO_ERROR;
+  GLboolean in_ok = GL_FALSE, out_ok = GL_FALSE;
+  GLint in_sz = -1, out_sz = -1;
+  if (cur_ctx != EGL_NO_CONTEXT && cur_dpy != EGL_NO_DISPLAY) {
+    gl_err = glGetError();
+    in_ok = glIsBuffer(g_in_ssbo);
+    out_ok = glIsBuffer(g_out_ssbo);
+    if (in_ok) {
+      glBindBuffer(kSsbo, g_in_ssbo);
+      glGetBufferParameteriv(kSsbo, 0x8764 /* GL_BUFFER_SIZE */, &in_sz);
+    }
+    if (out_ok) {
+      glBindBuffer(kSsbo, g_out_ssbo);
+      glGetBufferParameteriv(kSsbo, 0x8764, &out_sz);
+    }
+    glBindBuffer(kSsbo, 0);
+  }
+  LOGI("%s tid=%d passed_dpy=%p share=%p unity=%p cur_dpy=%p cur_ctx=%p same_share=%d "
+       "eglErr=0x%x glErr=0x%x ssbo %u/%u isBuffer=%d/%d bytes=%d/%d",
+       where, (int)gettid(), (void*)g_dpy, (void*)g_share, (void*)g_unity, (void*)cur_dpy,
+       (void*)cur_ctx, (int)(cur_ctx == g_share), (int)egl_err, (int)gl_err, g_in_ssbo,
+       g_out_ssbo, (int)in_ok, (int)out_ok, (int)in_sz, (int)out_sz);
 }
 
 const char* kPackSrc = R"(#version 310 es
@@ -436,14 +527,18 @@ bool CreateLiteRtEnv(bool with_egl) {
     nopt++;
   }
   if (with_egl) {
+    // LiteRT 2.1 gpu_environment.cc only copies EGL handles when type is Int
+    // (int_value = pointer bits). VoidPtr is ignored, so the previous path
+    // never actually handed Unity's context to CreateCLGLContext.
     opts[nopt].tag = kLiteRtEnvOptionTagEglDisplay;
-    opts[nopt].value.type = kLiteRtAnyTypeVoidPtr;
-    opts[nopt].value.ptr_value = g_dpy;
+    opts[nopt].value.type = kLiteRtAnyTypeInt;
+    opts[nopt].value.int_value = static_cast<int64_t>(reinterpret_cast<intptr_t>(g_dpy));
     nopt++;
     opts[nopt].tag = kLiteRtEnvOptionTagEglContext;
-    opts[nopt].value.type = kLiteRtAnyTypeVoidPtr;
-    opts[nopt].value.ptr_value = g_share;
+    opts[nopt].value.type = kLiteRtAnyTypeInt;
+    opts[nopt].value.int_value = static_cast<int64_t>(reinterpret_cast<intptr_t>(g_share));
     nopt++;
+    LOGI("EGL env opts as Int dpy=%p share=%p", (void*)g_dpy, (void*)g_share);
   }
   LiteRtStatus st = LiteRtCreateEnvironment(nopt, opts, &g_env);
   if (st != kLiteRtStatusOk) {
@@ -469,9 +564,13 @@ bool CompileGpu() {
     SetErrf("LiteRtSetOptionsHardwareAccelerators", st);
     return false;
   }
+  AttachBufferReporter(g_opts);
+  LogGpuState("before CreateCompiledModel");
   st = LiteRtCreateCompiledModel(g_env, g_model, g_opts, &g_compiled);
   if (st != kLiteRtStatusOk) {
     SetErrf("LiteRtCreateCompiledModel GPU", st);
+    DumpLiteRtErrors(g_compiled);
+    LogGpuState("after CreateCompiledModel fail");
     return false;
   }
   return true;
@@ -483,20 +582,21 @@ bool LoadModel(const char* path, const char* lib_dir) {
   g_model_path = path ? path : "";
   g_lib_dir = lib_dir ? lib_dir : "";
 
-  // Do not eglMakeCurrent first. Java CompiledModel.create compiles OpenCL with no
-  // GLES current; doing both on this thread is the S24 hang, and with EGL env
-  // options it returned RuntimeFailure (status 3) in ~3 ms on device.
-  bool with_egl = true;
-  if (!CreateLiteRtEnv(true) || !CompileGpu()) {
-    LOGW("GPU compile with EGL env failed (%s), retry without", g_err);
+  // LiteRT OpenCL delegate: eglGetCurrentContext() must equal the env's EGL
+  // context (delegate_opencl.cc:632 "EGL context or display does not match").
+  // That check runs on THIS worker, not Unity's render thread — the S24 hang
+  // was compiling on the render thread, not sharing a pbuffer context here.
+  if (!WorkerMakeCurrent()) {
     CloseLiteRtUnlocked();
-    with_egl = false;
-    if (!CreateLiteRtEnv(false) || !CompileGpu()) {
-      CloseLiteRtUnlocked();
-      return false;
-    }
+    return false;
   }
-  LOGI("CompiledModel GPU ok egl_env=%d", (int)with_egl);
+  LogGpuState("LoadModel after MakeCurrent (share must be current)");
+  if (!CreateLiteRtEnv(true) || !CompileGpu()) {
+    LOGW("GPU compile with EGL env failed (%s)", g_err);
+    CloseLiteRtUnlocked();
+    return false;
+  }
+  LOGI("CompiledModel GPU ok egl_env=1");
 
   if (!WorkerMakeCurrent()) {
     CloseLiteRtUnlocked();
@@ -538,22 +638,25 @@ bool Run() {
   if (!WorkerMakeCurrent()) return false;
 
   if (g_blit_sync && g_blit_sync != EGL_NO_SYNC_KHR) {
-    LiteRtEvent ev = nullptr;
-    LiteRtStatus est = LiteRtCreateEventFromEglSyncFence(g_env, g_blit_sync, &ev);
-    if (est == kLiteRtStatusOk && ev)
-      LiteRtSetTensorBufferEvent(g_in_tb, ev);
-    else if (pWaitSync)
+    // LiteRT OpenCL: "Attaching EGLSyncFence event to TensorBuffer is not
+    // needed. GL-CL event synchronization is handled internally." Doing it
+    // anyway returned status=3 / "Node 247 (LITERT_CL) failed to invoke."
+    if (pWaitSync)
       pWaitSync(g_dpy, g_blit_sync, 0);
     else
-      pClientWait(g_dpy, g_blit_sync, 0, EGL_FOREVER_KHR);
+      pClientWait(g_dpy, g_blit_sync, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER_KHR);
+    DestroySync(&g_blit_sync);
   }
 
+  LogGpuState("before Run");
   auto t0 = std::chrono::steady_clock::now();
   LiteRtStatus st = LiteRtRunCompiledModel(g_compiled, 0, 1, &g_in_tb, 1, &g_out_tb);
   auto t1 = std::chrono::steady_clock::now();
   g_run_ms.store(std::chrono::duration<float, std::milli>(t1 - t0).count());
   if (st != kLiteRtStatusOk) {
     SetErrf("LiteRtRunCompiledModel", st);
+    DumpLiteRtErrors(g_compiled);
+    LogGpuState("after Run fail");
     return false;
   }
 

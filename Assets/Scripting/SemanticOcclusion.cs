@@ -1353,6 +1353,7 @@ public class SemanticOcclusion : MonoBehaviour
     /// </summary>
     void SubmitFrame()
     {
+        if (_glFailed) return;
         if (UseGpuCameraInput())
         {
             ClearJobStages();
@@ -1781,7 +1782,7 @@ public class SemanticOcclusion : MonoBehaviour
         if (_glFailed) return;
         _glFailed = true;
         _glAwaitSubmit = false;
-        _loadNote = "gl path failed — falling back to gpu-blit readback: " + why;
+        _loadNote = "gl path failed (Java fallback OFF): " + why;
         Debug.LogWarning("[Seg] " + _loadNote);
     }
 
