@@ -19,6 +19,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #ifndef EGL_NO_SYNC_KHR
 #define EGL_NO_SYNC_KHR ((EGLSyncKHR)0)
@@ -78,6 +79,26 @@ LiteRtTensorBuffer g_in_tb = nullptr;
 LiteRtTensorBuffer g_out_tb = nullptr;
 std::string g_lib_dir;
 std::string g_model_path;
+
+// LiteRtDestroyCompiledModel SIGBUS in LiteRtDeleteMlDriftClDelegate after any
+// GL-CL Run on this phone (pc=0x10001), even idle, worker, EGL current. Park
+// the graph instead: stop running it, keep the OpenCL object until process exit.
+struct GpuGraph {
+  std::string path;
+  std::string lib_dir;
+  LiteRtEnvironment env = nullptr;
+  LiteRtModel model = nullptr;
+  LiteRtOptions opts = nullptr;
+  LiteRtCompiledModel compiled = nullptr;
+  LiteRtTensorBuffer in_tb = nullptr;
+  LiteRtTensorBuffer out_tb = nullptr;
+  GLuint in_ssbo = 0;
+  GLuint out_ssbo = 0;
+  int w = 0;
+  int h = 0;
+};
+std::vector<GpuGraph> g_graphs;
+int g_cur = -1;
 
 PFNEGLCREATESYNCKHRPROC pCreateSync = nullptr;
 PFNEGLDESTROYSYNCKHRPROC pDestroySync = nullptr;
@@ -583,6 +604,24 @@ bool WorkerMakeCurrent(bool silent = false) {
   return true;
 }
 
+// The share context may be current on only one thread. If the worker exits
+// still bound, the next NpuSegmenter thread gets EGL_BAD_ACCESS (0x3002) and
+// every model after the first one fails. Must run on the worker, before join.
+void WorkerReleaseCurrent() {
+  if (g_dpy == EGL_NO_DISPLAY) return;
+  EGLContext cur = eglGetCurrentContext();
+  if (cur == EGL_NO_CONTEXT) {
+    eglReleaseThread();
+    return;
+  }
+  if (!eglMakeCurrent(g_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT))
+    LOGI("worker unbind eglMakeCurrent 0x%x (cur=%p share=%p)", eglGetError(),
+         (void*)cur, (void*)g_share);
+  else
+    LOGI("worker released EGL context");
+  eglReleaseThread();
+}
+
 LiteRtRankedTensorType MakeType(int c, int h, int w) {
   LiteRtRankedTensorType t{};
   t.element_type = kLiteRtElementTypeFloat32;
@@ -609,50 +648,89 @@ void DrainGpu() {
   glFinish();
 }
 
-void CloseLiteRtUnlocked() {
-  // The HUD-cycle SIGBUS was LiteRtDestroyTensorBuffer then DestroyCompiledModel:
-  // the OpenCL delegate still held those CL-GL objects. Drain GPU work, destroy
-  // the compiled graph FIRST while the SSBOs still exist, then the wrappers.
-  bool have_gl = g_egl_ready.load() && WorkerMakeCurrent(true);
-  LOGI("CloseLiteRt compiled=%p env=%p have_gl=%d %s", (void*)g_compiled, (void*)g_env,
-       (int)have_gl, g_model_path.c_str());
-  if (have_gl) DrainGpu();
+void ApplyGraph(const GpuGraph& g) {
+  g_model_path = g.path;
+  g_lib_dir = g.lib_dir;
+  g_env = g.env;
+  g_model = g.model;
+  g_opts = g.opts;
+  g_compiled = g.compiled;
+  g_in_tb = g.in_tb;
+  g_out_tb = g.out_tb;
+  g_in_ssbo = g.in_ssbo;
+  g_out_ssbo = g.out_ssbo;
+  g_ssbo_w = g.w;
+  g_ssbo_h = g.h;
+  if (g.w > 8) g_w.store(g.w);
+  if (g.h > 8) g_h.store(g.h);
+}
 
-  if (g_compiled) {
-    LOGI("destroy CompiledModel");
-    LiteRtDestroyCompiledModel(g_compiled);
-    g_compiled = nullptr;
-    LOGI("destroyed CompiledModel");
-  }
-  if (g_in_tb) {
-    LiteRtDestroyTensorBuffer(g_in_tb);
-    g_in_tb = nullptr;
-  }
-  if (g_out_tb) {
-    LiteRtDestroyTensorBuffer(g_out_tb);
-    g_out_tb = nullptr;
-  }
-  if (g_opts) {
-    LiteRtDestroyOptions(g_opts);
-    g_opts = nullptr;
-  }
-  if (g_model) {
-    LiteRtDestroyModel(g_model);
-    g_model = nullptr;
-  }
-  if (g_env) {
-    LOGI("destroy Environment");
-    LiteRtDestroyEnvironment(g_env);
-    g_env = nullptr;
-    LOGI("destroyed Environment");
-  }
-  if (have_gl) {
-    DeleteSsbos();
-    glFinish();
-  }
+void DetachGlobals() {
+  g_env = nullptr;
+  g_model = nullptr;
+  g_opts = nullptr;
+  g_compiled = nullptr;
+  g_in_tb = nullptr;
+  g_out_tb = nullptr;
+  g_in_ssbo = 0;
+  g_out_ssbo = 0;
+  g_ssbo_w = 0;
+  g_ssbo_h = 0;
+  g_cur = -1;
   g_loaded.store(false);
   g_bound.store(false);
-  LOGI("CloseLiteRt done");
+}
+
+void ParkCurrent() {
+  if (g_egl_ready.load() && WorkerMakeCurrent(true)) DrainGpu();
+  if (g_compiled && g_in_tb) {
+    if (g_cur >= 0 && g_cur < (int)g_graphs.size()) {
+      GpuGraph& g = g_graphs[g_cur];
+      g.path = g_model_path;
+      g.lib_dir = g_lib_dir;
+      g.env = g_env;
+      g.model = g_model;
+      g.opts = g_opts;
+      g.compiled = g_compiled;
+      g.in_tb = g_in_tb;
+      g.out_tb = g_out_tb;
+      g.in_ssbo = g_in_ssbo;
+      g.out_ssbo = g_out_ssbo;
+      g.w = g_ssbo_w;
+      g.h = g_ssbo_h;
+    } else {
+      GpuGraph g;
+      g.path = g_model_path;
+      g.lib_dir = g_lib_dir;
+      g.env = g_env;
+      g.model = g_model;
+      g.opts = g_opts;
+      g.compiled = g_compiled;
+      g.in_tb = g_in_tb;
+      g.out_tb = g_out_tb;
+      g.in_ssbo = g_in_ssbo;
+      g.out_ssbo = g_out_ssbo;
+      g.w = g_ssbo_w;
+      g.h = g_ssbo_h;
+      g_graphs.push_back(g);
+      g_cur = (int)g_graphs.size() - 1;
+    }
+    LOGI("idle, parked %s ssbo %u/%u (%zu resident — not destroyed)",
+         g_model_path.c_str(), g_in_ssbo, g_out_ssbo, g_graphs.size());
+  }
+  DetachGlobals();
+}
+
+int FindGraph(const char* path) {
+  if (!path || !*path) return -1;
+  for (int i = 0; i < (int)g_graphs.size(); ++i)
+    if (g_graphs[i].path == path) return i;
+  return -1;
+}
+
+void CloseLiteRtUnlocked() {
+  // Stop using the graph. Do not call LiteRtDestroyCompiledModel.
+  ParkCurrent();
 }
 
 bool CreateLiteRtEnv(bool with_egl) {
@@ -722,10 +800,20 @@ bool LoadModel(const char* path, const char* lib_dir) {
     LOGI("LoadModel already current %s", next);
     return true;
   }
-  if (g_compiled || g_env) {
-    LOGI("LoadModel replacing %s with %s", g_model_path.c_str(), next);
-    CloseLiteRtUnlocked();
+  int hit = FindGraph(next);
+  if (hit >= 0) {
+    ParkCurrent();
+    g_cur = hit;
+    ApplyGraph(g_graphs[hit]);
+    g_loaded.store(true);
+    g_bound.store(true);
+    LOGI("LoadModel cache hit %s ssbo %u/%u %dx%d", next, g_in_ssbo, g_out_ssbo,
+         g_ssbo_w, g_ssbo_h);
+    SetErr("");
+    return true;
   }
+
+  if (g_compiled || g_env) ParkCurrent();
   g_model_path = next;
   if (lib_dir) g_lib_dir = lib_dir;
 
@@ -781,6 +869,23 @@ bool LoadModel(const char* path, const char* lib_dir) {
 
   g_loaded.store(true);
   g_bound.store(true);
+  if (FindGraph(g_model_path.c_str()) < 0) {
+    GpuGraph g;
+    g.path = g_model_path;
+    g.lib_dir = g_lib_dir;
+    g.env = g_env;
+    g.model = g_model;
+    g.opts = g_opts;
+    g.compiled = g_compiled;
+    g.in_tb = g_in_tb;
+    g.out_tb = g_out_tb;
+    g.in_ssbo = g_in_ssbo;
+    g.out_ssbo = g_out_ssbo;
+    g.w = g_ssbo_w;
+    g.h = g_ssbo_h;
+    g_graphs.push_back(g);
+    g_cur = (int)g_graphs.size() - 1;
+  }
   SetErr("");
   LOGI("CompiledModel GPU bound to GL SSBOs %u/%u", g_in_ssbo, g_out_ssbo);
   return true;
@@ -828,6 +933,7 @@ bool Run() {
 void CloseNative() {
   std::lock_guard<std::mutex> lock(g_mu);
   CloseLiteRtUnlocked();
+  WorkerReleaseCurrent();
 }
 
 } // namespace

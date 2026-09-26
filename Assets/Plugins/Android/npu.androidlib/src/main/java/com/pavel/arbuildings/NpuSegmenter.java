@@ -628,6 +628,12 @@ public final class NpuSegmenter {
         }
     }
 
+    private volatile long beatNs = System.nanoTime();
+
+    private void beat() {
+        beatNs = System.nanoTime();
+    }
+
     private void startWorker() {
         if (worker != null && worker.isAlive()) return;
         running = true;
@@ -643,6 +649,7 @@ public final class NpuSegmenter {
                 boolean gl;
                 synchronized (lock) {
                     while (running && !hasPending && !hasGlPending) {
+                        beat();
                         try {
                             lock.wait(200);
                         } catch (InterruptedException e) {
@@ -650,7 +657,10 @@ public final class NpuSegmenter {
                             return;
                         }
                     }
-                    if (!running) return;
+                    if (!running) {
+                        android.util.Log.i("NpuGl", "stop: worker idle, parking graph");
+                        return;
+                    }
                     gl = hasGlPending;
                     hasGlPending = false;
                     job = gl ? null : pending;
@@ -661,6 +671,7 @@ public final class NpuSegmenter {
                 boolean glOk = false;
                 if (gl) glOk = runGl();
                 else result = runOnce(job);
+                beat();
 
                 synchronized (lock) {
                     readyLabels = result;
@@ -669,16 +680,14 @@ public final class NpuSegmenter {
                 }
             }
         } finally {
-            // LiteRT OpenCL must be destroyed on this worker, with the share
-            // EGL context current. close() used to join then nativeGlClose from
-            // a ThreadPool thread — that is the HUD-cycle SIGSEGV in
-            // LiteRtDeleteMlDriftClDelegate.
+            // Park, do not DestroyCompiledModel — that SIGBUS on this Adreno.
             if (nativeLoaded) {
                 try { nativeGlClose(); } catch (Throwable ignored) { }
             }
             synchronized (lock) {
                 inFlight = false;
             }
+            beat();
         }
     }
 
@@ -1055,16 +1064,16 @@ public final class NpuSegmenter {
             lock.notifyAll();
         }
         if (w != null) {
+            android.util.Log.i("NpuGl", "stop: waiting for worker idle before park");
             try {
-                // A 1024² graph can sit in interpreter.run for many seconds. Closing the
-                // native handle under it is a SIGSEGV, not a Java exception — that is the
-                // crash that killed the process on the HUD's model-3 tap.
                 w.join(30_000);
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
             if (w.isAlive())
-                android.util.Log.e("NpuGl", "worker still alive after 30s join — skipped ThreadPool nativeGlClose");
+                android.util.Log.e("NpuGl", "worker still alive after 30s join — skipped park");
+            else
+                android.util.Log.i("NpuGl", "stop: worker joined, graph parked");
         }
         synchronized (lock) {
             inFlight = false;
