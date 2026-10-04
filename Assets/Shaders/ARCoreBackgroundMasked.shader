@@ -5,9 +5,11 @@ Shader "Unlit/ARCoreBackgroundMasked"
         _MainTex("Texture", 2D) = "white" {}
         _EnvironmentDepth("Texture", 2D) = "black" {}
         _SemanticMask("Semantic Mask", 2D) = "black" {}
+        _DelayedTex("Delayed Camera", 2D) = "black" {}
         _MaxOcclusionDistance("Max Occlusion Distance", Float) = 12
         _SegEnabled("Seg Enabled", Float) = 0
         _SegDebug("Seg Debug", Float) = 0
+        _UseDelayed("Use Delayed Camera", Float) = 0
     }
 
     SubShader
@@ -66,11 +68,13 @@ Shader "Unlit/ARCoreBackgroundMasked"
 #ifdef FRAGMENT
             varying ARCORE_TEXCOORD_TYPE textureCoord;
             uniform samplerExternalOES _MainTex;
+            uniform sampler2D _DelayedTex;
             uniform float _UnityCameraForwardScale;
             uniform sampler2D _SemanticMask;
             uniform float _MaxOcclusionDistance;
             uniform float _SegEnabled;
             uniform float _SegDebug;
+            uniform float _UseDelayed;
 
 #ifdef ARCORE_ENVIRONMENT_DEPTH_ENABLED
             uniform sampler2D _EnvironmentDepth;
@@ -108,7 +112,12 @@ Shader "Unlit/ARCoreBackgroundMasked"
 #else
                 vec2 tc = textureCoord;
 #endif
-                vec3 result = texture(_MainTex, tc).xyz;
+                // Always sample OES. A static branch on _UseDelayed lets Adreno/Mali
+                // DCE the live texture, ARCore stops updating the EGLImage, and both
+                // the snapshot and the mask freeze on the last frame.
+                vec3 live = texture(_MainTex, tc).xyz;
+                vec3 delayed = texture(_DelayedTex, tc).xyz;
+                vec3 result = mix(live, delayed, _UseDelayed);
                 float depth = 1.0;
                 vec4 seg = texture(_SemanticMask, tc);
                 float distance = 0.0;
@@ -210,11 +219,13 @@ Shader "Unlit/ARCoreBackgroundMasked"
             }
 
             sampler2D _MainTex;
+            sampler2D _DelayedTex;
             float _UnityCameraForwardScale;
             sampler2D _SemanticMask;
             float _MaxOcclusionDistance;
             float _SegEnabled;
             float _SegDebug;
+            float _UseDelayed;
 
 #ifdef ARCORE_ENVIRONMENT_DEPTH_ENABLED
             sampler2D _EnvironmentDepth;
@@ -257,7 +268,9 @@ Shader "Unlit/ARCoreBackgroundMasked"
 #else
                 float2 tc = i.textureCoord;
 #endif
-                float3 result = tex2D(_MainTex, tc).xyz;
+                float3 live = tex2D(_MainTex, tc).xyz;
+                float3 delayed = tex2D(_DelayedTex, tc).xyz;
+                float3 result = lerp(live, delayed, _UseDelayed);
                 float depth = 1.0;
                 float4 seg = tex2D(_SemanticMask, tc);
                 float distance = 0.0;

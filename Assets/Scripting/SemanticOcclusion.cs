@@ -103,6 +103,11 @@ public class SemanticOcclusion : MonoBehaviour
              "frame matches the orientation the CPU path used to feed the network.")]
     [SerializeField] bool gpuBlitFlipY = true;
 
+    [Tooltip("Show the camera frame that produced the current mask instead of the live OES " +
+             "feed. Hides the ~100 ms mask lag; the picture itself is that old. `delay off` " +
+             "is the live A/B.")]
+    [SerializeField] bool delayVideo = true;
+
     [Tooltip("Override DIS-ISNet spatial size after compile (LiteRT resize). 0 = baked " +
              "size from the file. Runtime resize of this graph to 512 already failed.")]
     [SerializeField] int inferSide = 0;
@@ -180,6 +185,9 @@ public class SemanticOcclusion : MonoBehaviour
     RenderTexture _inferFloatRT;
     RenderTexture _matteRT;
     RenderTexture _maskRT;
+    readonly RenderTexture[] _delayRt = new RenderTexture[2];
+    int _delayShow = -1;
+    int _delayPending = -1;
     static IntPtr _glEventFn;
     static bool _glEventFnMissingLogged;
     string _convertNote = "n/a";
@@ -218,6 +226,8 @@ public class SemanticOcclusion : MonoBehaviour
     static readonly int IdSeg = Shader.PropertyToID("_SegEnabled");
     static readonly int IdDbg = Shader.PropertyToID("_SegDebug");
     static readonly int IdDisplay = Shader.PropertyToID("_UnityDisplayTransform");
+    static readonly int IdDelayed = Shader.PropertyToID("_DelayedTex");
+    static readonly int IdUseDelayed = Shader.PropertyToID("_UseDelayed");
     const int GlEventCapture = 1, GlEventPack = 2, GlEventUnpack = 3;
 
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -274,6 +284,19 @@ public class SemanticOcclusion : MonoBehaviour
         {
             debugTint = value;
             ApplyMaterialFlags();
+        }
+    }
+
+    public bool DelayVideo
+    {
+        get => delayVideo;
+        set
+        {
+            delayVideo = value;
+            if (!value && _mat != null)
+                _mat.SetFloat(IdUseDelayed, 0f);
+            else
+                ApplyMaterialFlags();
         }
     }
 
@@ -832,6 +855,11 @@ public class SemanticOcclusion : MonoBehaviour
             r.AppendLine($"seg input          : {_npu.InputWidth}x{_npu.InputHeight}" +
                          (inferSide > 0 ? $" (segsize {inferSide})" : " (baked)"));
             r.AppendLine($"seg convert        : {_convertNote}");
+            r.AppendLine($"seg delay video    : " +
+                         (!delayVideo ? "OFF"
+                             : _delayShow >= 0 && _delayRt[_delayShow] != null
+                                 ? $"ON {_delayRt[_delayShow].width}x{_delayRt[_delayShow].height}"
+                                 : "ON (waiting first mask)"));
             r.AppendLine($"seg camera source  : " +
                          (!gpuCameraInput ? "cpu XRCpuImage"
                              : _gpuInputFailed ? "gpu FAILED, cpu fallback"
@@ -948,6 +976,7 @@ public class SemanticOcclusion : MonoBehaviour
         _gpuReadbackPending = false;
         ReleaseInferRT();
         ReleaseGlRTs();
+        ReleaseDelayRTs();
         _npu.Dispose();
         if (_maskTex != null) Destroy(_maskTex);
         if (_mat != null) Destroy(_mat);
@@ -978,6 +1007,8 @@ public class SemanticOcclusion : MonoBehaviour
         TryFinishGpuReadback();
         TrySubmitGl();
         WatchGlFailure();
+        if (delayVideo)
+            ApplyMaterialFlags();
 
         _frameSkip++;
         if (_frameSkip < inferEveryNFrames) return;
@@ -1551,7 +1582,9 @@ public class SemanticOcclusion : MonoBehaviour
             // Ramp paints the whole frame green. The background material already
             // knows how to sample this texture.
             float segWas = _mat.GetFloat(IdSeg);
+            float delayWas = _mat.GetFloat(IdUseDelayed);
             _mat.SetFloat(IdSeg, 0f);
+            _mat.SetFloat(IdUseDelayed, 0f);
             try
             {
                 Graphics.Blit(src, _camCopyRT, _mat);
@@ -1559,6 +1592,7 @@ public class SemanticOcclusion : MonoBehaviour
             finally
             {
                 _mat.SetFloat(IdSeg, segWas);
+                _mat.SetFloat(IdUseDelayed, delayWas);
             }
 
             SquareCropScaleOffset(_camCopyRT.width, _camCopyRT.height, inW, inH,
@@ -1705,6 +1739,8 @@ public class SemanticOcclusion : MonoBehaviour
             return true;
         }
 
+        SnapshotDelayedCamera(src);
+
         SquareCropScaleOffset(src.width, src.height, inW, inH, centreCrop, gpuBlitFlipY,
             out Vector2 cropScale, out Vector2 cropOffset);
         _disBlitMat.SetVector("_CropScale", cropScale);
@@ -1767,6 +1803,7 @@ public class SemanticOcclusion : MonoBehaviour
             _tSubmit = Now();
             StampMaskPeriod();
             RecordStages();
+            BindDelayedDisplay();
         }
 
         return true;
@@ -1820,6 +1857,7 @@ public class SemanticOcclusion : MonoBehaviour
         _stageLast[SE2E] = MsSince(_tFrame);
         StampMaskPeriod();
         RecordStages();
+        BindDelayedDisplay();
         if (!string.IsNullOrEmpty(_npu.LastError))
             _loadNote = $"gl infer: {_npu.LastError}";
     }
@@ -1879,8 +1917,13 @@ public class SemanticOcclusion : MonoBehaviour
         if (_glFailed) return;
         _glFailed = true;
         _glAwaitSubmit = false;
+        _delayShow = -1;
+        _delayPending = -1;
+        if (_mat != null)
+            _mat.SetFloat(IdUseDelayed, 0f);
         _loadNote = "gl path failed (Java fallback OFF): " + why;
         Debug.LogWarning("[Seg] " + _loadNote);
+        ApplyMaterialFlags();
     }
 
     void StampMaskPeriod()
@@ -1972,6 +2015,70 @@ public class SemanticOcclusion : MonoBehaviour
         ReleaseRT(ref _inferFloatRT);
         ReleaseRT(ref _matteRT);
         ReleaseRT(ref _maskRT);
+    }
+
+    void SnapshotDelayedCamera(Texture src)
+    {
+        if (!delayVideo || src == null || _disBlitMat == null) return;
+        int w = src.width;
+        int h = src.height;
+        if (!EnsureDelayRTs(w, h)) return;
+        int write = _delayShow == 0 ? 1 : 0;
+        // Native OES copy: identity display so we do not bake the background
+        // transform into the RT. The background still samples with `tc`.
+        _disBlitMat.SetMatrix(IdDisplay, Matrix4x4.identity);
+        _disBlitMat.SetVector("_CropScale", Vector2.one);
+        _disBlitMat.SetVector("_CropOffset", Vector2.zero);
+        _disBlitMat.SetFloat("_Normalize", 0f);
+        _disBlitMat.SetFloat("_Luma", 0f);
+        var prev = RenderTexture.active;
+        Graphics.Blit(src, _delayRt[write], _disBlitMat);
+        RenderTexture.active = prev;
+        _delayPending = write;
+    }
+
+    void BindDelayedDisplay()
+    {
+        if (_delayPending >= 0)
+            _delayShow = _delayPending;
+        ApplyMaterialFlags();
+    }
+
+    bool EnsureDelayRTs(int w, int h)
+    {
+        if (w < 8 || h < 8) return false;
+        if (_delayRt[0] != null && _delayRt[0].IsCreated() &&
+            _delayRt[0].width == w && _delayRt[0].height == h)
+            return true;
+        ReleaseDelayRTs();
+        for (int i = 0; i < 2; i++)
+        {
+            _delayRt[i] = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32)
+            {
+                hideFlags = HideFlags.HideAndDontSave,
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp,
+                useMipMap = false,
+                autoGenerateMips = false,
+                name = $"SegDelay{i}"
+            };
+            if (!_delayRt[i].Create())
+            {
+                ReleaseDelayRTs();
+                return false;
+            }
+        }
+        _delayShow = -1;
+        _delayPending = -1;
+        return true;
+    }
+
+    void ReleaseDelayRTs()
+    {
+        for (int i = 0; i < _delayRt.Length; i++)
+            ReleaseRT(ref _delayRt[i]);
+        _delayShow = -1;
+        _delayPending = -1;
     }
 
     static void ReleaseRT(ref RenderTexture rt)
@@ -2589,6 +2696,10 @@ public class SemanticOcclusion : MonoBehaviour
         _mat.SetFloat(IdDbg, live ? 1f : 0f);
         _mat.SetFloat(IdMax, maxOcclusionDistance);
         if (_maskTex != null) _mat.SetTexture(IdMask, _maskTex);
+        bool delayed = live && delayVideo && _delayShow >= 0 && _delayRt[_delayShow] != null;
+        _mat.SetFloat(IdUseDelayed, delayed ? 1f : 0f);
+        if (delayed)
+            _mat.SetTexture(IdDelayed, _delayRt[_delayShow]);
     }
 
     void ConfigureThingTable(int channels)

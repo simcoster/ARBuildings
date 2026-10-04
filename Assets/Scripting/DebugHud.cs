@@ -291,6 +291,11 @@ public class DebugHud : MonoBehaviour
                            seg.ModelLabel, _button))
                 seg.CycleModel();
             GUI.backgroundColor = segBg;
+            if (seg.DelayVideo) GUI.backgroundColor = Color.cyan;
+            if (GUI.Button(new Rect(w - pad - w * 0.22f, pad + btnH * 8.4f, w * 0.22f, btnH),
+                           seg.DelayVideo ? "delay ON" : "delay", _button))
+                seg.DelayVideo = !seg.DelayVideo;
+            GUI.backgroundColor = segBg;
         }
 
         // --- reload site config, so a pushed buildings.json needs no rebuild ---

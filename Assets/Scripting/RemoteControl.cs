@@ -38,6 +38,8 @@ using UnityEngine;
 ///     segbox on|off   occlude the whole bounding box of an object, not its silhouette
 ///     segrot N        rotate the camera image N deg clockwise before inference (0/90/180/270)
 ///     segcrop on|off  centred square crop instead of squashing the whole frame
+///     delay on|off    show the camera frame that produced the current mask, not live OES
+///                     (`segdelay` is an alias). Off is the live A/B.
 ///     segdump         write the exact image the network was handed, and its mask, as PNGs
 ///     segmodel FILE   swap the .tflite at runtime — pair it with pushing one to the device
 ///                     `canny` is built in (CPU edges, no file)
@@ -319,6 +321,13 @@ public class RemoteControl : MonoBehaviour
                 if (seg == null) return "no semantic occlusion";
                 seg.CentreCrop = OnOff(arg);
                 return $"segcrop {(seg.CentreCrop ? "on — centred square, no squash" : "off — whole frame squashed")}";
+
+            case "delay":
+            case "segdelay":
+                if (seg == null) return "no semantic occlusion";
+                if (arg.Length == 0) return $"delay {(seg.DelayVideo ? "on" : "off")}";
+                seg.DelayVideo = OnOff(arg);
+                return $"delay {(seg.DelayVideo ? "on" : "off")}";
 
             case "segcam":
                 if (seg == null) return "no semantic occlusion";
